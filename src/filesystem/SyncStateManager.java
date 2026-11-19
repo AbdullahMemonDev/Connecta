@@ -1,93 +1,134 @@
+package filesystem;
 
-// SyncStateManager
+import java.io.File;
+import java.io.FileInputStream;
+import java.security.MessageDigest;
+import java.util.Collections;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
-package filesystem; // Declares the package folder where this class resides
-
-import java.io.File; // Imports Java File class to reference local files on disk
-import java.io.FileInputStream; // Imports FileInputStream to read raw bytes from files
-import java.security.MessageDigest; // Imports MessageDigest to generate cryptographic hashes (MD5)
-import java.util.concurrent.ConcurrentHashMap; // Imports thread-safe map to avoid race conditions across multi-threads
-
+/**
+ * SyncStateManager
+ * 
+ * Tracks file synchronization history using high-performance cryptographic hashing
+ * and concurrent hash-table storage to eliminate distributed sync loops.
+ * 
+ * =========================================================================================
+ * DATA STRUCTURES & ALGORITHMS (DSA) UTILIZATION:
+ * 
+ * 1. Hash Table (ConcurrentHashMap<String, String>):
+ *    - Structure: Key = Relative File Path (e.g., "docs/report.pdf"), Value = MD5 Hex Checksum.
+ *    - Search Complexity: O(1) average-case time complexity for lookups, insertions, and updates.
+ *    - Thread Safety: Leverages ConcurrentHashMap with lock-striping (bucket-level locking)
+ *      to allow concurrent, non-blocking reads and partitioned writes across multiple background
+ *      file-watcher and network-receiver threads.
+ *    - Distributed Infinite Loop Prevention:
+ *      In peer-to-peer folder synchronization, when Peer A transfers a modified file to Peer B,
+ *      Peer B writes the file to disk. The operating system's native file-system watcher fires
+ *      a 'MODIFY' event on Peer B. Without loop prevention, Peer B would detect this event and
+ *      send the file back to Peer A, creating an infinite ping-pong network loop.
+ *      By performing an O(1) hash table lookup against the stored MD5 checksum, Peer B confirms
+ *      the current disk content matches the recorded state and safely discards the echo event.
+ * =========================================================================================
+ */
 public class SyncStateManager {
-    
-    // Thread-safe map storing file relative paths as keys and their MD5 checksums as values.
-    // ConcurrentHashMap prevents ConcurrentModificationException when background threads access it simultaneously.
-    private ConcurrentHashMap<String, String> syncHistory = new ConcurrentHashMap<>();
+
+    // DSA IMPLEMENTATION: Concurrent Hash Table mapping Relative Path -> MD5 Checksum
+    private final ConcurrentHashMap<String, String> syncHistory = new ConcurrentHashMap<>();
 
     /**
-     * Calculates the MD5 checksum of a given file.
-     * @param file The file whose hash needs to be calculated.
-     * @return A hexadecimal string representing the MD5 hash, or null if invalid.
+     * Calculates the MD5 cryptographic checksum of a local disk file.
+     * Reads in 8KB blocks to ensure memory-bounded computation for large files.
+     * 
+     * @param file The disk file to hash.
+     * @return 32-character Hexadecimal MD5 checksum, or null if computation fails.
      */
     public String calculateChecksum(File file) {
-        // Validation check: return null if file is null, doesn't exist, or is a directory
-        if (file == null || !file.exists() || file.isDirectory()) {
+        if (file == null || !file.exists() || !file.isFile()) {
             return null;
         }
-        
-        // Try-with-resources block ensures the file stream is automatically closed after reading
+
         try (FileInputStream fis = new FileInputStream(file)) {
-            
-            // Initialize MessageDigest instance specifically for the "MD5" algorithm
             MessageDigest md = MessageDigest.getInstance("MD5");
-            
-            // Create an 8KB byte buffer chunk to read the file in blocks (memory-safe for large files)
-            byte[] buffer = new byte[8192];
-            int bytesCount;
-            
-            // Read file chunks iteratively until EOF (-1) is reached
-            while ((bytesCount = fis.read(buffer)) != -1) {
-                // Update the digest engine with the bytes read in the current buffer
-                md.update(buffer, 0, bytesCount);
+            byte[] buffer = new byte[8192]; // Fixed 8KB sequential buffer
+            int bytesRead;
+
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                md.update(buffer, 0, bytesRead);
             }
-            
-            // Complete the hash computation and get the resulting raw byte array
-            byte[] bytes = md.digest();
-            
-            // Convert the raw byte array into a readable Hexadecimal string format
+
+            byte[] digestBytes = md.digest();
             StringBuilder sb = new StringBuilder();
-            for (byte b : bytes) {
-                // Converts byte to hex and pads with leading zeros if necessary
-                sb.append(Integer.toString((b & 0xff) + 0x100, 16).substring(1));
+            for (byte b : digestBytes) {
+                sb.append(String.format("%02x", b));
             }
-            return sb.toString(); // Return final checksum string
-            
+            return sb.toString();
         } catch (Exception e) {
-            e.printStackTrace(); // Print stack trace if an I/O or crypto exception occurs
             return null;
         }
     }
 
     /**
-     * Checks if the file event is already accounted for to prevent infinite sync loops.
-     * @param relativePath The path of the file relative to the shared root folder.
-     * @param checksum The current MD5 checksum of the file.
-     * @return true if it's a duplicate event (should be ignored), false if it's new.
+     * Checks if the file with given relative path and checksum is already synced.
+     * 
+     * DSA Complexity: O(1) hash table search.
+     * 
+     * @param relativePath Relative path from the root shared directory.
+     * @param checksum Current MD5 checksum of the file.
+     * @return true if the file already exists in history with the exact same checksum.
      */
     public boolean isAlreadySynced(String relativePath, String checksum) {
-        // Guard clause against null arguments
         if (relativePath == null || checksum == null) {
             return false;
         }
-        
-        // Retrieve the last recorded checksum for this file path from history
+
         String existingChecksum = syncHistory.get(relativePath);
-        
-        // If the path exists in history and its checksum matches the current one, it's a duplicate loop event
-        if (existingChecksum != null && existingChecksum.equals(checksum)) {
-            return true; // Ignore duplicate event to prevent infinite looping across peers
-        }
-        
-        // Otherwise, update the history map with this new/modified state
-        syncHistory.put(relativePath, checksum);
-        return false; // Not a duplicate; process/sync the file event
+        return existingChecksum != null && existingChecksum.equalsIgnoreCase(checksum);
     }
-    
+
     /**
-     * Clears history record when a file is deleted from the shared directory.
-     * @param relativePath The relative path of the deleted file.
+     * Updates the Hash Table with the latest synced state of a file.
+     * 
+     * DSA Complexity: O(1) hash table insertion.
+     */
+    public void recordSyncedState(String relativePath, String checksum) {
+        if (relativePath != null && checksum != null) {
+            syncHistory.put(relativePath, checksum);
+        }
+    }
+
+    /**
+     * Removes a file entry from the Hash Table when deleted.
+     * 
+     * DSA Complexity: O(1) hash table deletion.
      */
     public void removeHistory(String relativePath) {
-        syncHistory.remove(relativePath); // Removes entry from the concurrent map
+        if (relativePath != null) {
+            syncHistory.remove(relativePath);
+        }
+    }
+
+    /**
+     * Retrieves the stored checksum for a given relative path.
+     * 
+     * DSA Complexity: O(1) hash table lookup.
+     */
+    public String getChecksum(String relativePath) {
+        if (relativePath == null) return null;
+        return syncHistory.get(relativePath);
+    }
+
+    /**
+     * Returns an unmodifiable view of all currently tracked files and their checksums.
+     */
+    public Map<String, String> getAllTrackedFiles() {
+        return Collections.unmodifiableMap(syncHistory);
+    }
+
+    /**
+     * Clears all state history (e.g., when switching shared folders).
+     */
+    public void clear() {
+        syncHistory.clear();
     }
 }
