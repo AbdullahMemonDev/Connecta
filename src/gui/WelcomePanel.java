@@ -1,10 +1,31 @@
-
 package gui;
 
-import java.awt.*;
+import javax.swing.BorderFactory;
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.JButton;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.SwingUtilities;
+import java.awt.BasicStroke;
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Component;
+import java.awt.Cursor;
+import java.awt.Dimension;
+import java.awt.Font;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
+import java.awt.GridLayout;
+import java.awt.RenderingHints;
+import java.awt.Window;
 import java.awt.geom.RoundRectangle2D;
-import javax.swing.*;
 
+/**
+ * WelcomePanel
+ * 
+ * Aesthetic Cyber Neon welcome splash screen introducing Connecta's features.
+ */
 public class WelcomePanel extends JPanel {
 
     private final Color cyan = new Color(0, 217, 255);
@@ -19,30 +40,28 @@ public class WelcomePanel extends JPanel {
         content.setOpaque(false);
         content.setBorder(BorderFactory.createEmptyBorder(65, 65, 65, 65));
 
-        // LEFT SIDE
+        // LEFT SIDE: Branding & Call-To-Action
         JPanel left = new JPanel();
         left.setOpaque(false);
         left.setLayout(new BoxLayout(left, BoxLayout.Y_AXIS));
 
         JLabel logo = new JLabel("∞  CONNECTA");
-        logo.setFont(new Font("Segoe UI", Font.BOLD, 25));
+        logo.setFont(new Font("Segoe UI", Font.BOLD, 26));
         logo.setForeground(cyan);
         logo.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JLabel heading = new JLabel(
-                "<html>Welcome to<br><font color='#00D9FF'>Connecta.</font></html>"
-        );
-        heading.setFont(new Font("Segoe UI", Font.BOLD, 43));
+                "<html>Welcome to<br><font color='#00D9FF'>Connecta.</font></html>");
+        heading.setFont(new Font("Segoe UI", Font.BOLD, 44));
         heading.setForeground(white);
         heading.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JLabel description = new JLabel(
-                "<html><div style='width:300px;'>"
-                + "Connect your devices and experience "
-                + "a smarter way to share and synchronize files."
-                + "</div></html>"
-        );
-        description.setFont(new Font("Segoe UI", Font.PLAIN, 16));
+                "<html><div style='width:320px;'>"
+                        + "Pair two devices on your local network and experience "
+                        + "effortless, real-time peer-to-peer folder synchronization."
+                        + "</div></html>");
+        description.setFont(new Font("Segoe UI", Font.PLAIN, 15));
         description.setForeground(new Color(170, 185, 210));
         description.setAlignmentX(Component.LEFT_ALIGNMENT);
 
@@ -53,13 +72,22 @@ public class WelcomePanel extends JPanel {
         startButton.setFocusPainted(false);
         startButton.setBorderPainted(false);
         startButton.setCursor(new Cursor(Cursor.HAND_CURSOR));
-        startButton.setPreferredSize(new Dimension(210, 50));
-        startButton.setMaximumSize(new Dimension(210, 50));
+        startButton.setPreferredSize(new Dimension(220, 52));
+        startButton.setMaximumSize(new Dimension(220, 52));
         startButton.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        startButton.addMouseListener(new java.awt.event.MouseAdapter() {
+            public void mouseEntered(java.awt.event.MouseEvent e) {
+                startButton.setBackground(new Color(115, 95, 245));
+            }
+
+            public void mouseExited(java.awt.event.MouseEvent e) {
+                startButton.setBackground(new Color(95, 75, 220));
+            }
+        });
 
         startButton.addActionListener(e -> {
             Window window = SwingUtilities.getWindowAncestor(this);
-
             if (window instanceof ConnectaMainWindow) {
                 ((ConnectaMainWindow) window).showConnectionScreen();
             }
@@ -72,17 +100,17 @@ public class WelcomePanel extends JPanel {
 
         left.add(Box.createVerticalGlue());
         left.add(logo);
-        left.add(Box.createVerticalStrut(45));
+        left.add(Box.createVerticalStrut(40));
         left.add(heading);
-        left.add(Box.createVerticalStrut(22));
+        left.add(Box.createVerticalStrut(20));
         left.add(description);
-        left.add(Box.createVerticalStrut(38));
+        left.add(Box.createVerticalStrut(36));
         left.add(startButton);
         left.add(Box.createVerticalStrut(25));
         left.add(tagline);
         left.add(Box.createVerticalGlue());
 
-        // RIGHT SIDE - DEVICE ILLUSTRATION
+        // RIGHT SIDE: Device Illustration Graphic
         JPanel illustration = new DeviceIllustration();
         illustration.setOpaque(false);
 
@@ -93,7 +121,6 @@ public class WelcomePanel extends JPanel {
     }
 
     private class DeviceIllustration extends JPanel {
-
         DeviceIllustration() {
             setOpaque(false);
         }
@@ -103,48 +130,33 @@ public class WelcomePanel extends JPanel {
             super.paintComponent(g);
 
             Graphics2D g2 = (Graphics2D) g.create();
-
-            g2.setRenderingHint(
-                    RenderingHints.KEY_ANTIALIASING,
-                    RenderingHints.VALUE_ANTIALIAS_ON
-            );
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
             int w = getWidth();
             int h = getHeight();
 
-            // Glass background
+            // Glass Panel Card Background
             g2.setColor(new Color(20, 31, 60, 170));
-            g2.fill(new RoundRectangle2D.Float(
-                    10, 25, w - 20, h - 50, 35, 35
-            ));
+            g2.fill(new RoundRectangle2D.Float(10, 25, w - 20, h - 50, 35, 35));
 
             g2.setColor(new Color(0, 217, 255, 100));
             g2.setStroke(new BasicStroke(1.5f));
-            g2.draw(new RoundRectangle2D.Float(
-                    10, 25, w - 20, h - 50, 35, 35
-            ));
+            g2.draw(new RoundRectangle2D.Float(10, 25, w - 20, h - 50, 35, 35));
 
             int centerX = w / 2;
             int centerY = h / 2;
 
-            // Connection beam
+            // Connection beam line
             g2.setColor(new Color(128, 85, 255, 90));
             g2.setStroke(new BasicStroke(5f));
-            g2.drawLine(centerX - 90, centerY,
-                    centerX + 90, centerY);
+            g2.drawLine(centerX - 90, centerY, centerX + 90, centerY);
 
             // Laptop screen
             g2.setColor(new Color(0, 217, 255));
-            g2.fillRoundRect(
-                    centerX - 125, centerY - 95,
-                    145, 105, 12, 12
-            );
+            g2.fillRoundRect(centerX - 125, centerY - 95, 145, 105, 12, 12);
 
             g2.setColor(new Color(12, 20, 42));
-            g2.fillRoundRect(
-                    centerX - 118, centerY - 88,
-                    131, 91, 7, 7
-            );
+            g2.fillRoundRect(centerX - 118, centerY - 88, 131, 91, 7, 7);
 
             g2.setColor(cyan);
             g2.setFont(new Font("Segoe UI", Font.BOLD, 30));
@@ -152,29 +164,20 @@ public class WelcomePanel extends JPanel {
 
             // Laptop base
             g2.setColor(new Color(140, 155, 190));
-            g2.fillRoundRect(
-                    centerX - 140, centerY + 12,
-                    175, 10, 6, 6
-            );
+            g2.fillRoundRect(centerX - 140, centerY + 12, 175, 10, 6, 6);
 
             // Smartphone
             g2.setColor(violet);
-            g2.fillRoundRect(
-                    centerX + 65, centerY - 105,
-                    78, 145, 15, 15
-            );
+            g2.fillRoundRect(centerX + 65, centerY - 105, 78, 145, 15, 15);
 
             g2.setColor(new Color(12, 20, 42));
-            g2.fillRoundRect(
-                    centerX + 71, centerY - 98,
-                    66, 131, 10, 10
-            );
+            g2.fillRoundRect(centerX + 71, centerY - 98, 66, 131, 10, 10);
 
             g2.setColor(cyan);
             g2.setFont(new Font("Segoe UI", Font.BOLD, 23));
             g2.drawString("∞", centerX + 91, centerY - 22);
 
-            // Connection symbol
+            // Connection sparkle
             g2.setColor(Color.WHITE);
             g2.setFont(new Font("Segoe UI", Font.BOLD, 20));
             g2.drawString("✦", centerX + 22, centerY - 20);
@@ -185,7 +188,7 @@ public class WelcomePanel extends JPanel {
             g2.drawString("LAPTOP", centerX - 100, centerY + 55);
 
             g2.setColor(new Color(180, 150, 255));
-            g2.drawString("MOBILE", centerX + 77, centerY + 65);
+            g2.drawString("DEVICE", centerX + 77, centerY + 65);
 
             g2.dispose();
         }
