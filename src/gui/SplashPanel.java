@@ -1,10 +1,22 @@
-
 package gui;
 
-import java.awt.*;
+import javax.swing.JPanel;
+import java.awt.BasicStroke;
+import java.awt.Color;
+import java.awt.Font;
+import java.awt.FontMetrics;
+import java.awt.GradientPaint;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
+import java.awt.GridBagLayout;
+import java.awt.RenderingHints;
 import java.awt.geom.RoundRectangle2D;
-import javax.swing.*;
 
+/**
+ * SplashPanel
+ * 
+ * Aesthetic Cyber Neon launch splash screen displayed during initial application bootstrapping.
+ */
 public class SplashPanel extends JPanel {
 
     private final Color cyan = new Color(0, 217, 255);
@@ -20,11 +32,7 @@ public class SplashPanel extends JPanel {
         super.paintComponent(g);
 
         Graphics2D g2 = (Graphics2D) g.create();
-
-        g2.setRenderingHint(
-                RenderingHints.KEY_ANTIALIASING,
-                RenderingHints.VALUE_ANTIALIAS_ON
-        );
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
         int w = getWidth();
         int h = getHeight();
@@ -32,20 +40,18 @@ public class SplashPanel extends JPanel {
         // Background gradient
         GradientPaint background = new GradientPaint(
                 0, 0, new Color(9, 13, 28),
-                w, h, new Color(22, 20, 55)
-        );
-
+                w, h, new Color(22, 20, 55));
         g2.setPaint(background);
         g2.fillRect(0, 0, w, h);
 
-        // Decorative neon circles
+        // Decorative neon glow circles
         g2.setColor(new Color(0, 217, 255, 25));
         g2.fillOval(w / 2 - 190, h / 2 - 190, 380, 380);
 
         g2.setColor(new Color(128, 85, 255, 30));
         g2.fillOval(w / 2 - 145, h / 2 - 145, 290, 290);
 
-        // Logo
+        // Logo & Typography
         String symbol = "∞";
         String name = "CONNECTA";
         String tagline = "TWO DEVICES. ONE CONNECTION.";
@@ -62,53 +68,33 @@ public class SplashPanel extends JPanel {
         int nameY = h / 2 + 45;
         int taglineY = h / 2 + 85;
 
-        // Neon symbol
+        // Neon Glow Shadow for Symbol
         g2.setFont(symbolFont);
         g2.setColor(new Color(0, 217, 255, 65));
-        g2.drawString(
-                symbol,
-                (w - symbolMetrics.stringWidth(symbol)) / 2,
-                symbolY + 3
-        );
+        g2.drawString(symbol, (w - symbolMetrics.stringWidth(symbol)) / 2, symbolY + 3);
 
         g2.setColor(cyan);
-        g2.drawString(
-                symbol,
-                (w - symbolMetrics.stringWidth(symbol)) / 2,
-                symbolY
-        );
+        g2.drawString(symbol, (w - symbolMetrics.stringWidth(symbol)) / 2, symbolY);
 
-        // App name
+        // App Name
         g2.setFont(nameFont);
         g2.setColor(Color.WHITE);
-        g2.drawString(
-                name,
-                (w - nameMetrics.stringWidth(name)) / 2,
-                nameY
-        );
+        g2.drawString(name, (w - nameMetrics.stringWidth(name)) / 2, nameY);
 
         // Tagline
         g2.setFont(taglineFont);
         g2.setColor(cyan);
-        g2.drawString(
-                tagline,
-                (w - taglineMetrics.stringWidth(tagline)) / 2,
-                taglineY
-        );
+        g2.drawString(tagline, (w - taglineMetrics.stringWidth(tagline)) / 2, taglineY);
 
-        // Bottom loading line
-        int lineWidth = 110;
+        // Bottom Loading Bar Graphic
+        int lineWidth = 120;
         int lineX = (w - lineWidth) / 2;
 
         g2.setColor(new Color(255, 255, 255, 35));
-        g2.fill(new RoundRectangle2D.Float(
-                lineX, h / 2 + 125, lineWidth, 4, 4, 4
-        ));
+        g2.fill(new RoundRectangle2D.Float(lineX, h / 2 + 125, lineWidth, 4, 4, 4));
 
         g2.setColor(violet);
-        g2.fill(new RoundRectangle2D.Float(
-                lineX, h / 2 + 125, 55, 4, 4, 4
-        ));
+        g2.fill(new RoundRectangle2D.Float(lineX, h / 2 + 125, 60, 4, 4, 4));
 
         g2.dispose();
     }
