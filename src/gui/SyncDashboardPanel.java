@@ -69,6 +69,7 @@ public class SyncDashboardPanel extends JPanel {
     private JLabel filesSentLabel;
     private JLabel filesReceivedLabel;
     private JLabel totalTransfersLabel;
+    private JLabel identificationLabel;
 
     // Folder & Remote Device Container Panels
     private JPanel foldersContainerPanel;
@@ -585,12 +586,12 @@ public class SyncDashboardPanel extends JPanel {
         grid.add(telemetryLabel("Identification"));
         JPanel idPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
         idPanel.setOpaque(false);
-        JLabel idLabel = new JLabel(AppManager.getInstance().getMyConnectaID());
-        idLabel.setFont(new Font("Monospaced", Font.BOLD, 12));
-        idLabel.setForeground(CYAN);
+        identificationLabel = new JLabel(AppManager.getInstance().getMyConnectaID());
+        identificationLabel.setFont(new Font("Monospaced", Font.BOLD, 12));
+        identificationLabel.setForeground(CYAN);
         JButton copyBtn = miniButton("Copy");
         copyBtn.addActionListener(e -> copyConnectaID());
-        idPanel.add(idLabel);
+        idPanel.add(identificationLabel);
         idPanel.add(copyBtn);
         grid.add(idPanel);
 
@@ -670,11 +671,11 @@ public class SyncDashboardPanel extends JPanel {
     }
 
     private JPanel createRemoteDeviceRow(ConfigManager.PairedDevice dev, boolean isOnline) {
-        JPanel row = new JPanel(new BorderLayout());
+        JPanel row = new JPanel(new BorderLayout(8, 0));
         row.setOpaque(true);
         row.setBackground(currentCard2);
         row.setBorder(new EmptyBorder(8, 12, 8, 12));
-        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 46));
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 48));
 
         JPanel left = new JPanel();
         left.setOpaque(false);
@@ -692,12 +693,34 @@ public class SyncDashboardPanel extends JPanel {
         left.add(name);
         left.add(addr);
 
+        JPanel right = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        right.setOpaque(false);
+
         JLabel statusBadge = new JLabel(isOnline ? "● Connected / Online" : "● Disconnected / Offline");
         statusBadge.setFont(new Font("Segoe UI", Font.BOLD, 11));
         statusBadge.setForeground(isOnline ? GREEN : PINK);
 
+        JButton removeBtn = miniDangerButton("✕ Remove");
+        removeBtn.setToolTipText("Remove and unpair device from saved configuration");
+        removeBtn.addActionListener(e -> {
+            int confirm = JOptionPane.showConfirmDialog(
+                this,
+                "Are you sure you want to remove and unpair device:\n'" + dev.getDeviceName() + "' (" + dev.getDeviceId() + ")?",
+                "Remove Remote Device",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+            );
+            if (confirm == JOptionPane.YES_OPTION) {
+                AppManager.getInstance().removePairedDevice(dev.getDeviceId());
+                playChime();
+            }
+        });
+
+        right.add(statusBadge);
+        right.add(removeBtn);
+
         row.add(left, BorderLayout.WEST);
-        row.add(statusBadge, BorderLayout.EAST);
+        row.add(right, BorderLayout.EAST);
 
         return row;
     }
@@ -906,6 +929,9 @@ public class SyncDashboardPanel extends JPanel {
         if (downloadRateLabel != null) {
             downloadRateLabel.setText(AppManager.getInstance().getCurrentDownloadRate());
         }
+        if (identificationLabel != null) {
+            identificationLabel.setText(AppManager.getInstance().getMyConnectaID());
+        }
     }
 
     private void appendLog(String fileName, String message) {
@@ -960,6 +986,17 @@ public class SyncDashboardPanel extends JPanel {
         JButton button = new JButton(text);
         button.setFont(new Font("Segoe UI", Font.BOLD, 10));
         button.setForeground(CYAN);
+        button.setBackground(currentCard2);
+        button.setFocusPainted(false);
+        button.setBorder(new EmptyBorder(4, 8, 4, 8));
+        button.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        return button;
+    }
+
+    private JButton miniDangerButton(String text) {
+        JButton button = new JButton(text);
+        button.setFont(new Font("Segoe UI", Font.BOLD, 10));
+        button.setForeground(PINK);
         button.setBackground(currentCard2);
         button.setFocusPainted(false);
         button.setBorder(new EmptyBorder(4, 8, 4, 8));

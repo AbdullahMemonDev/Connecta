@@ -69,7 +69,8 @@ public class AppManager {
     private Thread watcherThread;
 
     // Identification & Network State
-    private String myConnectaID = "Resolving...";
+    // Permanent Connecta ID initialized synchronously from persistent config (immune to Wi-Fi switches)
+    private String myConnectaID;
     private String localDeviceName;
     private String connectedPeerAddress = null;
     private int connectedPeerPort = 8080;
@@ -84,6 +85,11 @@ public class AppManager {
 
     // Active incoming file staging map (RelativePath -> ExpectedChecksum)
     private final ConcurrentHashMap<String, String> incomingFileExpectedChecksums = new ConcurrentHashMap<>();
+
+    // DUAL-GUARD INFINITE LOOP PREVENTION:
+    // Tracks timestamps of recently received/assembled files to suppress self-triggered OS file watcher events
+    private final ConcurrentHashMap<String, Long> recentlyReceivedFiles = new ConcurrentHashMap<>();
+    private static final long RECENT_RECEIVE_WINDOW_MS = 15000; // 15 seconds cooldown
 
     // DSA IMPLEMENTATION: LIFO Stack for tracking recent sync history and undo
     private final Stack<String> transferHistoryStack = new Stack<>();
@@ -128,6 +134,7 @@ public class AppManager {
 
     private AppManager() {
         this.configManager = ConfigManager.getInstance();
+        this.myConnectaID = configManager.getPermanentConnectaID(); // Synchronously available on load
         this.localDeviceName = configManager.getLocalDeviceName();
         this.networkManager = new NetworkManager();
         this.syncStateManager = new SyncStateManager();
@@ -150,7 +157,8 @@ public class AppManager {
      * Initializes background networking, UDP LAN discovery, and auto-reconnect services.
      */
     public void start() {
-        this.myConnectaID = IDResolver.generateIDFromIP();
+        // Ensure permanent ID is preserved across network changes
+        this.myConnectaID = configManager.getPermanentConnectaID();
         networkManager.startServer();
 
         // Calculate initial local folder state
@@ -174,10 +182,11 @@ public class AppManager {
         networkManager.setNetworkListener(new NetworkManager.NetworkListener() {
             @Override
             public void onServerStarted(int port, String id) {
-                AppManager.this.myConnectaID = id;
+                // Preserve the permanent Connecta ID
+                AppManager.this.myConnectaID = configManager.getPermanentConnectaID();
                 dispatch(() -> {
                     for (AppEventListener l : listeners) {
-                        l.onServerReady(id, port);
+                        l.onServerReady(AppManager.this.myConnectaID, port);
                     }
                 });
             }
@@ -190,7 +199,7 @@ public class AppManager {
 
                 setupStreamerListeners(streamer);
 
-                // Immediately send HANDSHAKE packet exchanging identity
+                // Immediately send HANDSHAKE packet exchanging permanent identity
                 streamer.offerPacket(FilePacket.createHandshakePacket(myConnectaID, localDeviceName, networkManager.getListeningPort(), "2.0"), 500);
 
                 dispatch(() -> {
@@ -287,7 +296,7 @@ public class AppManager {
         String payload = packet.getRelativePath();
         String[] parts = payload.split("\\|");
         if (parts.length >= 3) {
-            String pId = parts[0].trim();
+            String pId = parts[0].trim().toUpperCase();
             String pName = parts[1].trim();
             int pPort = 8080;
             try { pPort = Integer.parseInt(parts[2].trim()); } catch (Exception ignored) {}
@@ -295,7 +304,7 @@ public class AppManager {
             this.connectedPeerID = pId;
             this.connectedPeerName = pName;
 
-            // Automatically save to Persistent Configuration Manager
+            // Automatically save/update in Persistent Configuration Manager
             configManager.addOrUpdatePairedDevice(pId, pName, connectedPeerAddress, pPort);
             configManager.setDeviceOnline(pId, true);
 
@@ -314,18 +323,33 @@ public class AppManager {
     }
 
     private void handleDiscoveredPeer(String peerId, String peerName, String peerIp, int peerPort) {
+        if (peerId == null || peerId.equalsIgnoreCase(myConnectaID)) return;
+
         ConfigManager.PairedDevice paired = configManager.getPairedDevice(peerId);
         if (paired != null) {
-            paired.setLastKnownIp(peerIp);
-            paired.setPort(peerPort);
-            paired.setDeviceName(peerName);
-            configManager.saveConfig();
+            boolean changed = false;
+            if (!peerIp.equalsIgnoreCase(paired.getLastKnownIp())) {
+                paired.setLastKnownIp(peerIp);
+                changed = true;
+            }
+            if (paired.getPort() != peerPort) {
+                paired.setPort(peerPort);
+                changed = true;
+            }
+            if (!peerName.equalsIgnoreCase(paired.getDeviceName())) {
+                paired.setDeviceName(peerName);
+                changed = true;
+            }
+            paired.setLastSeen(System.currentTimeMillis());
 
-            dispatch(() -> {
-                for (AppEventListener l : listeners) {
-                    l.onPairedDevicesChanged();
-                }
-            });
+            if (changed) {
+                configManager.saveConfig();
+                dispatch(() -> {
+                    for (AppEventListener l : listeners) {
+                        l.onPairedDevicesChanged();
+                    }
+                });
+            }
 
             // If not connected, initiate auto-reconnect immediately
             if (!networkManager.isConnected() && !isConnecting) {
@@ -353,12 +377,25 @@ public class AppManager {
                 List<ConfigManager.PairedDevice> paired = configManager.getPairedDevices();
                 for (ConfigManager.PairedDevice dev : paired) {
                     if (networkManager.isConnected()) break;
+
                     String ip = dev.getLastKnownIp();
+                    int port = dev.getPort();
+
+                    // Check if UDP discovery has a fresher IP for this paired device
+                    if (discoveryDaemon != null) {
+                        LanDiscoveryDaemon.DiscoveredPeer disc = discoveryDaemon.getDiscoveredPeer(dev.getDeviceId());
+                        if (disc != null && !disc.ip.isEmpty()) {
+                            ip = disc.ip;
+                            port = disc.port;
+                        }
+                    }
+
                     if (ip == null || ip.isEmpty()) {
                         ip = IDResolver.resolveIPFromID(dev.getDeviceId());
                     }
-                    if (ip != null && !ip.isEmpty()) {
-                        autoConnectToPeer(ip, dev.getPort(), dev.getDeviceId());
+
+                    if (ip != null && !ip.isEmpty() && !ip.equals("127.0.0.1")) {
+                        autoConnectToPeer(ip, port, dev.getDeviceId());
                         break;
                     }
                 }
@@ -414,13 +451,15 @@ public class AppManager {
             if (FolderWatcherDaemon.isIgnoredFile(child)) continue;
 
             String childRel = relPrefix.isEmpty() ? child.getName() : relPrefix + "/" + child.getName();
+            String normChildRel = SyncStateManager.normalizePath(childRel);
+
             if (child.isDirectory()) {
-                scanAndSyncAllLocalFilesDFS(child, childRel);
+                scanAndSyncAllLocalFilesDFS(child, normChildRel);
             } else if (child.isFile()) {
                 String checksum = syncStateManager.calculateChecksum(child);
                 if (checksum != null) {
-                    if (!syncStateManager.isAlreadySynced(childRel, checksum)) {
-                        syncFileToPeer(child, childRel);
+                    if (!syncStateManager.isAlreadySynced(normChildRel, checksum)) {
+                        syncFileToPeer(child, normChildRel);
                     }
                 }
             }
@@ -437,7 +476,7 @@ public class AppManager {
             for (String line : lines) {
                 int idx = line.indexOf('=');
                 if (idx > 0) {
-                    String relPath = line.substring(0, idx).trim();
+                    String relPath = SyncStateManager.normalizePath(line.substring(0, idx).trim());
                     String remoteHash = line.substring(idx + 1).trim();
 
                     File localFile = new File(rootDir, relPath);
@@ -457,30 +496,38 @@ public class AppManager {
     // ================= INCOMING FILE CHUNKS & ATOMIC REASSEMBLY =================
 
     private void handleIncomingFileStart(FilePacket packet) {
-        String relPath = packet.getRelativePath();
+        String normPath = SyncStateManager.normalizePath(packet.getRelativePath());
         String expectedChecksum = packet.getChecksum();
+
+        // Pre-register in anti-loop tracker to prevent self-echoes
+        recentlyReceivedFiles.put(normPath, System.currentTimeMillis());
+
         if (expectedChecksum != null && !expectedChecksum.isEmpty()) {
-            incomingFileExpectedChecksums.put(relPath, expectedChecksum);
+            incomingFileExpectedChecksums.put(normPath, expectedChecksum);
         }
 
         // Initialize staging temporary file
-        File tempFile = new File(getSharedFolderPath(), relPath + FileChunkManager.TMP_EXTENSION);
+        File tempFile = new File(getSharedFolderPath(), normPath + FileChunkManager.TMP_EXTENSION);
         if (tempFile.exists()) {
             tempFile.delete(); // Clear stale prior temp file
         }
 
         dispatch(() -> {
             for (AppEventListener l : listeners) {
-                l.onTransferProgress(relPath, 0, "Receiving metadata...", false);
+                l.onTransferProgress(normPath, 0, "Receiving metadata...", false);
                 l.onSyncStatusChanged("Syncing (Incoming)...");
-                l.onLog(relPath, "Incoming file staged: " + packet.getFileSize() + " bytes");
+                l.onLog(normPath, "Incoming file staged: " + packet.getFileSize() + " bytes");
             }
         });
     }
 
     private void handleIncomingFileChunk(FilePacket packet) {
-        String relPath = packet.getRelativePath();
-        File tempFile = new File(getSharedFolderPath(), relPath + FileChunkManager.TMP_EXTENSION);
+        String normPath = SyncStateManager.normalizePath(packet.getRelativePath());
+
+        // Keep active lease in recently received files
+        recentlyReceivedFiles.put(normPath, System.currentTimeMillis());
+
+        File tempFile = new File(getSharedFolderPath(), normPath + FileChunkManager.TMP_EXTENSION);
 
         try {
             boolean isFirstChunk = (packet.getSequenceNumber() == 0);
@@ -492,35 +539,45 @@ public class AppManager {
 
             dispatch(() -> {
                 for (AppEventListener l : listeners) {
-                    l.onTransferProgress(relPath, percent, "Receiving chunk " + current + " of " + total, false);
+                    l.onTransferProgress(normPath, percent, "Receiving chunk " + current + " of " + total, false);
                 }
             });
         } catch (IOException e) {
             dispatch(() -> {
                 for (AppEventListener l : listeners) {
-                    l.onLog(relPath, "Write Error: " + e.getMessage());
+                    l.onLog(normPath, "Write Error: " + e.getMessage());
                 }
             });
         }
     }
 
     private void handleIncomingFileComplete(FilePacket packet) {
-        String relPath = packet.getRelativePath();
-        File tempFile = new File(getSharedFolderPath(), relPath + FileChunkManager.TMP_EXTENSION);
-        File finalDestFile = new File(getSharedFolderPath(), relPath);
+        String normPath = SyncStateManager.normalizePath(packet.getRelativePath());
+
+        // Refresh anti-loop timestamp
+        recentlyReceivedFiles.put(normPath, System.currentTimeMillis());
+
+        File tempFile = new File(getSharedFolderPath(), normPath + FileChunkManager.TMP_EXTENSION);
+        File finalDestFile = new File(getSharedFolderPath(), normPath);
 
         String expectedChecksum = packet.getChecksum();
         if (expectedChecksum == null || expectedChecksum.isEmpty()) {
-            expectedChecksum = incomingFileExpectedChecksums.remove(relPath);
+            expectedChecksum = incomingFileExpectedChecksums.remove(normPath);
         }
 
         // ATOMIC COMMIT: Verify MD5 of temp file and atomically move to final location
-        boolean success = chunkManager.finalizeReassembly(tempFile, finalDestFile, expectedChecksum, syncStateManager, relPath);
+        boolean success = chunkManager.finalizeReassembly(tempFile, finalDestFile, expectedChecksum, syncStateManager, normPath);
 
         if (success) {
+            // Re-affirm anti-loop lock and record in O(1) hash table
+            recentlyReceivedFiles.put(normPath, System.currentTimeMillis());
+            if (expectedChecksum != null) {
+                syncStateManager.recordSyncedState(normPath, expectedChecksum);
+            }
+
             // DSA: O(1) Stack push to record file in LIFO history
             synchronized (transferHistoryStack) {
-                transferHistoryStack.push(relPath);
+                transferHistoryStack.push(normPath);
             }
 
             int rec = filesReceivedCount.incrementAndGet();
@@ -530,55 +587,55 @@ public class AppManager {
 
             dispatch(() -> {
                 for (AppEventListener l : listeners) {
-                    l.onTransferProgress(relPath, 100, "Received & Verified", false);
-                    l.onTransferComplete(relPath, false);
+                    l.onTransferProgress(normPath, 100, "Received & Verified", false);
+                    l.onTransferComplete(normPath, false);
                     l.onSyncStatusChanged("Up to Date");
-                    l.onLog(relPath, "MD5 verified. Committed atomically to shared folder.");
+                    l.onLog(normPath, "MD5 verified. Committed atomically to shared folder.");
                     l.onStatsUpdated(filesSentCount.get(), rec, total);
                 }
             });
         } else {
             dispatch(() -> {
                 for (AppEventListener l : listeners) {
-                    l.onTransferProgress(relPath, 0, "Checksum Integrity Error", false);
-                    l.onLog(relPath, "Integrity Check Failed! Discarded corrupted file.");
+                    l.onTransferProgress(normPath, 0, "Checksum Integrity Error", false);
+                    l.onLog(normPath, "Integrity Check Failed! Discarded corrupted file.");
                 }
             });
         }
     }
 
     private void handleIncomingFileDelete(FilePacket packet) {
-        String relPath = packet.getRelativePath();
-        File fileToDelete = new File(getSharedFolderPath(), relPath);
+        String normPath = SyncStateManager.normalizePath(packet.getRelativePath());
+        File fileToDelete = new File(getSharedFolderPath(), normPath);
         if (fileToDelete.exists()) {
             fileToDelete.delete();
-            syncStateManager.removeHistory(relPath);
+            syncStateManager.removeHistory(normPath);
             rescanLocalFolderStats();
 
             dispatch(() -> {
                 for (AppEventListener l : listeners) {
-                    l.onLog(relPath, "Deleted remotely by peer");
+                    l.onLog(normPath, "Deleted remotely by peer");
                 }
             });
         }
     }
 
     private void handleIncomingUndo(FilePacket packet) {
-        String relPath = packet.getRelativePath();
-        File fileToUndo = new File(getSharedFolderPath(), relPath);
+        String normPath = SyncStateManager.normalizePath(packet.getRelativePath());
+        File fileToUndo = new File(getSharedFolderPath(), normPath);
         if (fileToUndo.exists()) {
             fileToUndo.delete();
-            syncStateManager.removeHistory(relPath);
+            syncStateManager.removeHistory(normPath);
             rescanLocalFolderStats();
         }
 
         synchronized (transferHistoryStack) {
-            transferHistoryStack.remove(relPath);
+            transferHistoryStack.remove(normPath);
         }
 
         dispatch(() -> {
             for (AppEventListener l : listeners) {
-                l.onLog(relPath, "Rollback / Undo applied by peer");
+                l.onLog(normPath, "Rollback / Undo applied by peer");
             }
         });
     }
@@ -599,6 +656,17 @@ public class AppManager {
             return;
         }
 
+        final String normPath = SyncStateManager.normalizePath(relativePath);
+
+        // Anti-Loop Guard: Suppress self-triggered events for files recently written by peer
+        Long lastReceived = recentlyReceivedFiles.get(normPath);
+        if (lastReceived != null && (System.currentTimeMillis() - lastReceived) < RECENT_RECEIVE_WINDOW_MS) {
+            String currentHash = syncStateManager.calculateChecksum(file);
+            if (currentHash != null && syncStateManager.isAlreadySynced(normPath, currentHash)) {
+                return;
+            }
+        }
+
         new Thread(() -> {
             try {
                 // PARTIAL-READ RACE CONDITION FIX: Wait until file writing completes and file is readable
@@ -610,11 +678,11 @@ public class AppManager {
                 if (checksum == null) return;
 
                 // DSA HASH TABLE CHECK: O(1) search complexity to prevent infinite sync loops
-                if (syncStateManager.isAlreadySynced(relativePath, checksum)) {
+                if (syncStateManager.isAlreadySynced(normPath, checksum)) {
                     return;
                 }
 
-                syncStateManager.recordSyncedState(relativePath, checksum);
+                syncStateManager.recordSyncedState(normPath, checksum);
 
                 long fileSize = file.length();
                 int totalChunks = FileChunkManager.calculateTotalChunks(fileSize);
@@ -628,12 +696,12 @@ public class AppManager {
                 });
 
                 // Send FILE_START packet
-                FilePacket startPacket = FilePacket.createStartPacket(relativePath, fileSize, totalChunks, checksum);
+                FilePacket startPacket = FilePacket.createStartPacket(normPath, fileSize, totalChunks, checksum);
                 streamer.queuePacket(startPacket); // DSA: Bounded FIFO Queue put()
 
                 // Split file into isolated 8KB byte[] buffers and stream with automatic backpressure
                 chunkManager.splitFileIntoChunks(file, (chunk, seq, total, bytesRead, totalBytes) -> {
-                    FilePacket chunkPacket = FilePacket.createChunkPacket(relativePath, seq, total, chunk);
+                    FilePacket chunkPacket = FilePacket.createChunkPacket(normPath, seq, total, chunk);
                     
                     // DSA BACKPRESSURE: Blocks producer if Bounded Queue (64) is full
                     streamer.queuePacket(chunkPacket);
@@ -647,11 +715,11 @@ public class AppManager {
                 });
 
                 // Send FILE_COMPLETE packet (EOF + MD5 Checksum)
-                FilePacket completePacket = FilePacket.createCompletePacket(relativePath, checksum);
+                FilePacket completePacket = FilePacket.createCompletePacket(normPath, checksum);
                 streamer.queuePacket(completePacket);
 
                 synchronized (transferHistoryStack) {
-                    transferHistoryStack.push(relativePath);
+                    transferHistoryStack.push(normPath);
                 }
 
                 int sent = filesSentCount.incrementAndGet();
@@ -683,13 +751,14 @@ public class AppManager {
         if (!networkManager.isConnected()) return;
         SocketStreamer streamer = networkManager.getStreamer();
         if (streamer != null && streamer.isRunning()) {
-            syncStateManager.removeHistory(relativePath);
-            streamer.offerPacket(FilePacket.createDeletePacket(relativePath), 1000);
+            String normPath = SyncStateManager.normalizePath(relativePath);
+            syncStateManager.removeHistory(normPath);
+            streamer.offerPacket(FilePacket.createDeletePacket(normPath), 1000);
             rescanLocalFolderStats();
 
             dispatch(() -> {
                 for (AppEventListener l : listeners) {
-                    l.onLog(relativePath, "Deletion synced to partner");
+                    l.onLog(normPath, "Deletion synced to partner");
                 }
             });
         }
@@ -760,19 +829,32 @@ public class AppManager {
             folderWatcher = new FolderWatcherDaemon(getSharedFolderPath(), new FolderWatcherDaemon.EventListener() {
                 @Override
                 public void onFileEventDetected(File file, String relativePath, FolderWatcherDaemon.WatchKind kind) {
+                    String normPath = SyncStateManager.normalizePath(relativePath);
+
+                    // Dual-Guard Infinite Loop Suppression:
+                    // If file was recently received from peer and hash matches or is in cooldown window, ignore echo event
+                    Long lastReceived = recentlyReceivedFiles.get(normPath);
+                    if (lastReceived != null && (System.currentTimeMillis() - lastReceived) < RECENT_RECEIVE_WINDOW_MS) {
+                        String currentHash = syncStateManager.calculateChecksum(file);
+                        if (currentHash != null && syncStateManager.isAlreadySynced(normPath, currentHash)) {
+                            return; // Suppress echo event completely
+                        }
+                    }
+
                     if (kind == FolderWatcherDaemon.WatchKind.CREATE || kind == FolderWatcherDaemon.WatchKind.MODIFY) {
-                        syncFileToPeer(file, relativePath);
+                        syncFileToPeer(file, normPath);
                     } else if (kind == FolderWatcherDaemon.WatchKind.DELETE) {
-                        syncFileDeletion(relativePath);
+                        syncFileDeletion(normPath);
                     }
                     rescanLocalFolderStats();
                 }
 
                 @Override
                 public void onInitialScanFileFound(File file, String relativePath) {
+                    String normPath = SyncStateManager.normalizePath(relativePath);
                     String hash = syncStateManager.calculateChecksum(file);
                     if (hash != null) {
-                        syncStateManager.recordSyncedState(relativePath, hash);
+                        syncStateManager.recordSyncedState(normPath, hash);
                     }
                 }
             });
@@ -853,10 +935,105 @@ public class AppManager {
         });
     }
 
-    // ================= CONNECTION ACTIONS =================
+    // ================= CONNECTION & DEVICE ACTIONS =================
 
-    public void connectToPeer(String partnerID) {
-        networkManager.connectToPeer(partnerID);
+    /**
+     * Connects to a remote peer by their Permanent Connecta ID or direct LAN IP/port.
+     */
+    public void connectToPeer(String partnerInput) {
+        if (partnerInput == null || partnerInput.trim().isEmpty()) {
+            dispatch(() -> {
+                for (AppEventListener l : listeners) {
+                    l.onConnectionError("Please enter a valid Partner ID or IP address.");
+                }
+            });
+            return;
+        }
+
+        final String target = partnerInput.trim();
+
+        new Thread(() -> {
+            String ipToConnect = null;
+            int portToConnect = NetworkManager.DEFAULT_PORT;
+
+            // 1. Direct IP format (e.g. "192.168.1.5" or "192.168.1.5:8080")
+            if (target.contains(".")) {
+                if (target.contains(":")) {
+                    String[] parts = target.split(":");
+                    ipToConnect = parts[0].trim();
+                    try {
+                        portToConnect = Integer.parseInt(parts[1].trim());
+                    } catch (Exception ignored) {}
+                } else {
+                    ipToConnect = target;
+                }
+            }
+
+            // 2. Saved Paired Device in ConfigManager
+            if (ipToConnect == null) {
+                ConfigManager.PairedDevice paired = configManager.getPairedDevice(target);
+                if (paired != null && !paired.getLastKnownIp().isEmpty()) {
+                    ipToConnect = paired.getLastKnownIp();
+                    portToConnect = paired.getPort();
+                }
+            }
+
+            // 3. Actively Discovered Peer on LAN (UDP Beacon)
+            if (ipToConnect == null && discoveryDaemon != null) {
+                LanDiscoveryDaemon.DiscoveredPeer peer = discoveryDaemon.getDiscoveredPeer(target);
+                if (peer != null && !peer.ip.isEmpty()) {
+                    ipToConnect = peer.ip;
+                    portToConnect = peer.port;
+                }
+            }
+
+            // 4. Legacy Hex-encoded IPv4 fallback
+            if (ipToConnect == null) {
+                String decoded = IDResolver.resolveIPFromID(target);
+                if (decoded != null) {
+                    ipToConnect = decoded;
+                }
+            }
+
+            if (ipToConnect != null) {
+                final String finalIp = ipToConnect;
+                final int finalPort = portToConnect;
+                dispatch(() -> {
+                    for (AppEventListener l : listeners) {
+                        l.onLog("Connection", "Connecting to " + target + " (" + finalIp + ":" + finalPort + ")...");
+                    }
+                });
+                networkManager.connectToAddress(finalIp, finalPort);
+            } else {
+                dispatch(() -> {
+                    for (AppEventListener l : listeners) {
+                        l.onConnectionError("Peer '" + target + "' not discovered on LAN. Check Wi-Fi or enter LAN IP directly.");
+                    }
+                });
+            }
+        }, "Connecta-ConnectWorker").start();
+    }
+
+    /**
+     * Unpairs and deletes a remote device from persistent configuration.
+     * Closes any active socket connection to that device.
+     */
+    public void removePairedDevice(String deviceId) {
+        if (deviceId == null) return;
+        String cleanId = deviceId.trim().toUpperCase();
+
+        if (connectedPeerID != null && connectedPeerID.equalsIgnoreCase(cleanId)) {
+            disconnectPeer();
+        }
+
+        configManager.removePairedDevice(cleanId);
+
+        dispatch(() -> {
+            for (AppEventListener l : listeners) {
+                l.onPairedDevicesChanged();
+                l.onLog("Device", "Removed paired device: " + cleanId);
+            }
+        });
     }
 
     public void disconnectPeer() {
@@ -891,6 +1068,7 @@ public class AppManager {
     public String getCurrentDownloadRate() { return currentDownloadRate; }
     public FolderWatcherDaemon.FolderStats getCurrentFolderStats() { return currentFolderStats; }
     public ConfigManager getConfigManager() { return configManager; }
+    public LanDiscoveryDaemon getDiscoveryDaemon() { return discoveryDaemon; }
 
     public String getFormattedUptime() {
         long uptimeSec = (System.currentTimeMillis() - appStartTime) / 1000;

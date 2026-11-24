@@ -5,13 +5,22 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * LanDiscoveryDaemon
  * 
  * Provides automated peer discovery over Local Area Networks (LAN) using UDP broadcast beacons.
  * Allows paired Connecta devices to automatically discover each other's current IP addresses
- * (even across dynamic DHCP reallocations) and trigger instantaneous TCP background reconnection.
+ * (even across dynamic DHCP reallocations or Wi-Fi network switches) and trigger instantaneous
+ * TCP background reconnection.
+ * 
+ * Features:
+ * 1. Broadcasts Permanent Connecta ID, Device Name, active LAN IP, and TCP listening port.
+ * 2. Maintains a concurrent registry of discovered LAN peers.
+ * 3. Notifies AppManager when peers appear or change IP addresses.
  */
 public class LanDiscoveryDaemon {
 
@@ -29,15 +38,52 @@ public class LanDiscoveryDaemon {
     private Thread beaconThread;
     private Thread listenerThread;
 
+    /**
+     * Model representing a remote peer discovered on the LAN.
+     */
+    public static class DiscoveredPeer {
+        public final String id;
+        public final String name;
+        public final String ip;
+        public final int port;
+        public final long lastSeen;
+
+        public DiscoveredPeer(String id, String name, String ip, int port, long lastSeen) {
+            this.id = id != null ? id.trim().toUpperCase() : "";
+            this.name = name != null ? name.trim() : "Unknown";
+            this.ip = ip != null ? ip.trim() : "";
+            this.port = port > 0 ? port : 8080;
+            this.lastSeen = lastSeen;
+        }
+    }
+
+    // Registry of actively discovered peers on the LAN
+    private final ConcurrentHashMap<String, DiscoveredPeer> discoveredPeers = new ConcurrentHashMap<>();
+
     public interface DiscoveryListener {
         void onPeerDiscovered(String peerId, String peerName, String peerIp, int peerPort);
     }
 
     public LanDiscoveryDaemon(String myConnectaID, String myDeviceName, int myTcpPort, DiscoveryListener listener) {
-        this.myConnectaID = myConnectaID;
+        this.myConnectaID = myConnectaID != null ? myConnectaID.trim().toUpperCase() : "UNKNOWN";
         this.myDeviceName = myDeviceName != null ? myDeviceName.replace("|", "_") : "Connecta-Device";
         this.myTcpPort = myTcpPort;
         this.listener = listener;
+    }
+
+    /**
+     * Retrieves an actively discovered LAN peer by its 8-character Connecta ID.
+     */
+    public DiscoveredPeer getDiscoveredPeer(String peerId) {
+        if (peerId == null) return null;
+        return discoveredPeers.get(peerId.trim().toUpperCase());
+    }
+
+    /**
+     * Returns a snapshot of all currently discovered peers on the LAN.
+     */
+    public List<DiscoveredPeer> getAllDiscoveredPeers() {
+        return new ArrayList<>(discoveredPeers.values());
     }
 
     /**
@@ -54,13 +100,14 @@ public class LanDiscoveryDaemon {
                 broadcastSocket = new DatagramSocket();
                 broadcastSocket.setBroadcast(true);
 
-                String message = BEACON_PREFIX + myConnectaID + "|" + myDeviceName + "|" + myTcpPort;
-                byte[] buffer = message.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-
                 InetAddress broadcastAddr = InetAddress.getByName("255.255.255.255");
 
                 while (running) {
                     try {
+                        String currentLanIp = IDResolver.getLocalIPv4Address();
+                        String message = BEACON_PREFIX + myConnectaID + "|" + myDeviceName + "|" + currentLanIp + "|" + myTcpPort;
+                        byte[] buffer = message.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
                         DatagramPacket packet = new DatagramPacket(buffer, buffer.length, broadcastAddr, UDP_DISCOVERY_PORT);
                         broadcastSocket.send(packet);
                     } catch (IOException ignored) {}
@@ -107,16 +154,32 @@ public class LanDiscoveryDaemon {
                         String payload = content.substring(BEACON_PREFIX.length());
                         String[] parts = payload.split("\\|");
                         if (parts.length >= 3) {
-                            String peerId = parts[0].trim();
+                            String peerId = parts[0].trim().toUpperCase();
                             String peerName = parts[1].trim();
+                            String peerIp = packet.getAddress().getHostAddress();
                             int peerPort = 8080;
-                            try {
-                                peerPort = Integer.parseInt(parts[2].trim());
-                            } catch (Exception ignored) {}
+
+                            if (parts.length >= 4) {
+                                // Payload format: ID | Name | LAN_IP | Port
+                                String declaredIp = parts[2].trim();
+                                if (!declaredIp.isEmpty() && !declaredIp.equals("127.0.0.1") && !declaredIp.contains(":")) {
+                                    peerIp = declaredIp;
+                                }
+                                try {
+                                    peerPort = Integer.parseInt(parts[3].trim());
+                                } catch (Exception ignored) {}
+                            } else {
+                                // Legacy payload format: ID | Name | Port
+                                try {
+                                    peerPort = Integer.parseInt(parts[2].trim());
+                                } catch (Exception ignored) {}
+                            }
 
                             // Ignore loopback beacons from this local instance
                             if (!peerId.equalsIgnoreCase(myConnectaID)) {
-                                String peerIp = packet.getAddress().getHostAddress();
+                                DiscoveredPeer discovered = new DiscoveredPeer(peerId, peerName, peerIp, peerPort, System.currentTimeMillis());
+                                discoveredPeers.put(peerId, discovered);
+
                                 if (listener != null) {
                                     listener.onPeerDiscovered(peerId, peerName, peerIp, peerPort);
                                 }

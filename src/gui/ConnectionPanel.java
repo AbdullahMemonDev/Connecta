@@ -334,13 +334,14 @@ public class ConnectionPanel extends JPanel {
         card.add(Box.createVerticalStrut(16));
 
         // PARTNER'S CONNECTA ID INPUT
-        card.add(sectionLabel("PARTNER'S CONNECTA ID"));
+        card.add(sectionLabel("PARTNER'S CONNECTA ID OR LAN IP"));
         card.add(Box.createVerticalStrut(7));
 
         partnerField = new JTextField();
         partnerField.setFont(new Font("Monospaced", Font.BOLD, 15));
         partnerField.setForeground(WHITE);
         partnerField.setCaretColor(CYAN);
+        partnerField.setToolTipText("Enter 8-digit Connecta ID or LAN IP address (e.g. A3F8B12C or 192.168.1.5)");
         partnerField.setBackground(CARD_BG);
         partnerField.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createLineBorder(new Color(65, 91, 128), 1),
@@ -460,19 +461,12 @@ public class ConnectionPanel extends JPanel {
         String partnerID = getInputID();
 
         if (partnerID.isEmpty()) {
-            statusLabel.setText("●  Please enter partner ID");
+            statusLabel.setText("●  Please enter partner ID or LAN IP");
             statusLabel.setForeground(ERROR_RED);
             return;
         }
 
-        String ip = IDResolver.resolveIPFromID(partnerID);
-        if (ip == null) {
-            statusLabel.setText("●  Invalid ID format (must be 8-digit Hex code)");
-            statusLabel.setForeground(ERROR_RED);
-            return;
-        }
-
-        statusLabel.setText("●  Connecting to " + ip + "...");
+        statusLabel.setText("●  Connecting to " + partnerID + "...");
         statusLabel.setForeground(CYAN);
         connectButton.setEnabled(false);
 

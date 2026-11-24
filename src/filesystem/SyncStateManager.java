@@ -20,7 +20,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * DATA STRUCTURES & ALGORITHMS (DSA) UTILIZATION:
  * 
  * 1. Hash Table (ConcurrentHashMap<String, String>):
- *    - Structure: Key = Relative File Path (e.g., "docs/report.pdf"), Value = MD5 Hex Checksum.
+ *    - Structure: Key = Normalized Relative File Path (e.g., "docs/report.pdf"), Value = MD5 Hex Checksum.
  *    - Search Complexity: O(1) average-case time complexity for lookups, insertions, and updates.
  *    - Thread Safety: Leverages ConcurrentHashMap with lock-striping (bucket-level locking)
  *      to allow concurrent, non-blocking reads and partitioned writes across multiple background
@@ -38,6 +38,21 @@ public class SyncStateManager {
 
     // DSA IMPLEMENTATION: Concurrent Hash Table mapping Relative Path -> MD5 Checksum
     private final ConcurrentHashMap<String, String> syncHistory = new ConcurrentHashMap<>();
+
+    /**
+     * Normalizes a file path across platforms:
+     * - Replaces all Windows backslashes with forward slashes
+     * - Removes any redundant leading slashes
+     * - Trims whitespace
+     */
+    public static String normalizePath(String path) {
+        if (path == null) return "";
+        String p = path.replace('\\', '/').trim();
+        while (p.startsWith("/")) {
+            p = p.substring(1);
+        }
+        return p;
+    }
 
     /**
      * Calculates the MD5 cryptographic checksum of a local disk file.
@@ -85,13 +100,15 @@ public class SyncStateManager {
             return false;
         }
 
+        String norm = normalizePath(relativePath);
+
         // Always treat temporary or staging files as already accounted for
-        if (relativePath.endsWith(FileChunkManager.TMP_EXTENSION)) {
+        if (norm.endsWith(FileChunkManager.TMP_EXTENSION) || norm.endsWith(".tmp") || norm.endsWith(".part")) {
             return true;
         }
 
-        String existingChecksum = syncHistory.get(relativePath);
-        return existingChecksum != null && existingChecksum.equalsIgnoreCase(checksum);
+        String existingChecksum = syncHistory.get(norm);
+        return existingChecksum != null && existingChecksum.equalsIgnoreCase(checksum.trim());
     }
 
     /**
@@ -101,7 +118,8 @@ public class SyncStateManager {
      */
     public void recordSyncedState(String relativePath, String checksum) {
         if (relativePath != null && checksum != null) {
-            syncHistory.put(relativePath, checksum);
+            String norm = normalizePath(relativePath);
+            syncHistory.put(norm, checksum.trim());
         }
     }
 
@@ -112,7 +130,7 @@ public class SyncStateManager {
      */
     public void removeHistory(String relativePath) {
         if (relativePath != null) {
-            syncHistory.remove(relativePath);
+            syncHistory.remove(normalizePath(relativePath));
         }
     }
 
@@ -123,7 +141,7 @@ public class SyncStateManager {
      */
     public String getChecksum(String relativePath) {
         if (relativePath == null) return null;
-        return syncHistory.get(relativePath);
+        return syncHistory.get(normalizePath(relativePath));
     }
 
     /**
@@ -133,7 +151,7 @@ public class SyncStateManager {
     public String buildManifestString() {
         StringBuilder sb = new StringBuilder();
         for (Map.Entry<String, String> entry : syncHistory.entrySet()) {
-            if (!entry.getKey().endsWith(FileChunkManager.TMP_EXTENSION)) {
+            if (!entry.getKey().endsWith(FileChunkManager.TMP_EXTENSION) && !entry.getKey().endsWith(".tmp")) {
                 sb.append(entry.getKey()).append("=").append(entry.getValue()).append("\n");
             }
         }
@@ -155,7 +173,7 @@ public class SyncStateManager {
         for (String line : lines) {
             int idx = line.indexOf('=');
             if (idx > 0) {
-                String remotePath = line.substring(0, idx).trim();
+                String remotePath = normalizePath(line.substring(0, idx).trim());
                 String remoteHash = line.substring(idx + 1).trim();
 
                 String localHash = syncHistory.get(remotePath);

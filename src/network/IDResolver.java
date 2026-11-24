@@ -1,5 +1,7 @@
 package network;
 
+import core.ConfigManager;
+
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
@@ -11,13 +13,15 @@ import java.util.List;
 /**
  * IDResolver Utility Class
  * 
- * Provides robust physical LAN IP detection and bi-directional mapping between
- * IPv4 LAN addresses and compact 8-character Hexadecimal Connecta Identifiers
- * (e.g., "192.168.1.5" <-> "C0A80105").
+ * Provides robust physical LAN IP detection and bi-directional identification mapping.
  * 
- * Specifically audits all local network interfaces and eliminates virtual adapters
- * (WSL, VMware, VirtualBox, Hyper-V, vEthernet, Docker, ZeroTier, Tailscale) to reliably
- * resolve the active physical Wi-Fi or Ethernet LAN IPv4 address.
+ * Key Functions:
+ * 1. Permanent Connecta ID: Retrieved directly from ConfigManager (generated once, persisted locally,
+ *    and immune to Wi-Fi/DHCP IP switches).
+ * 2. Physical LAN IPv4 Resolution: Specifically audits all network interfaces and eliminates
+ *    virtual adapters (WSL, VMware, VirtualBox, Hyper-V, vEthernet, Docker, ZeroTier, Tailscale)
+ *    to reliably resolve the active physical Wi-Fi or Ethernet LAN IPv4 address.
+ * 3. Legacy Hex Mapping: Resolves legacy 8-character hex-encoded IPv4 addresses for backwards compatibility.
  */
 public class IDResolver {
 
@@ -28,32 +32,39 @@ public class IDResolver {
     };
 
     /**
+     * Retrieves the persistent unique Connecta ID for this device.
+     * Guaranteed never to change across network/Wi-Fi switches.
+     */
+    public static String getPermanentConnectaID() {
+        return ConfigManager.getInstance().getPermanentConnectaID();
+    }
+
+    /**
      * Resolves the primary active physical LAN IPv4 address of the local machine and
      * converts it into an 8-character uppercase Hexadecimal Connecta ID.
      * 
-     * @return 8-character Hex Connecta ID, or "ERROR" if IP cannot be determined.
+     * @return 8-character Hex Connecta ID, or permanent ID fallback.
      */
     public static String generateIDFromIP() {
         try {
             String ip = getLocalIPv4Address();
             if (ip == null || ip.isEmpty() || ip.equals("127.0.0.1")) {
-                ip = InetAddress.getLocalHost().getHostAddress();
+                return getPermanentConnectaID();
             }
 
             StringBuilder hexString = new StringBuilder();
             String[] parts = ip.split("\\.");
             if (parts.length != 4) {
-                return "ERROR";
+                return getPermanentConnectaID();
             }
 
-            // Convert each 8-bit octet (0-255) to a 2-character Hexadecimal string
             for (String part : parts) {
                 int octet = Integer.parseInt(part.trim());
                 hexString.append(String.format("%02X", octet));
             }
             return hexString.toString().toUpperCase();
         } catch (Exception e) {
-            return "ERROR";
+            return getPermanentConnectaID();
         }
     }
 
@@ -61,7 +72,7 @@ public class IDResolver {
      * Converts an 8-character Hexadecimal Connecta ID back into a standard
      * dotted-quad IPv4 address (e.g., "C0A80105" -> "192.168.1.5").
      * 
-     * @param id The 8-character Hex ID entered by the user.
+     * @param id The 8-character Hex ID.
      * @return Decoded IPv4 string, or null if ID format is invalid.
      */
     public static String resolveIPFromID(String id) {
@@ -87,6 +98,24 @@ public class IDResolver {
             return ip.toString();
         } catch (NumberFormatException e) {
             return null; // Non-hexadecimal characters encountered
+        }
+    }
+
+    /**
+     * Validates whether a given string is a dotted-decimal IPv4 address.
+     */
+    public static boolean isIPv4Address(String input) {
+        if (input == null) return false;
+        String[] parts = input.trim().split("\\.");
+        if (parts.length != 4) return false;
+        try {
+            for (String part : parts) {
+                int octet = Integer.parseInt(part.trim());
+                if (octet < 0 || octet > 255) return false;
+            }
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
         }
     }
 

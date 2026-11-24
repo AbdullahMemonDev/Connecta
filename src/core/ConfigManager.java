@@ -9,28 +9,31 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * ConfigManager
  * 
  * Persistent configuration store for Connecta. Automatically saves and restores:
- * 1. Paired Remote Devices (Device ID, Device Name, Last Known LAN IP and Port).
- * 2. Shared Folder Paths and synchronization preferences.
- * 3. Local telemetry identity (Machine name, UI theme preferences).
+ * 1. Permanent Unique Connecta ID (generated once on first run, immune to Wi-Fi/IP changes).
+ * 2. Paired Remote Devices (Device ID, Device Name, Last Known LAN IP and Port).
+ * 3. Shared Folder Paths and synchronization preferences.
+ * 4. Local telemetry identity (Machine hostname, UI theme preferences).
  * 
- * Persisted in a local properties file: ~/.connecta/config.properties
+ * Persisted in local config file: D:\Projects\Connecta\config.properties
  */
 public class ConfigManager {
 
     private static ConfigManager instance;
 
-    private static final String CONFIG_DIR_NAME = ".connecta";
+    private static final String PROJECT_DIR = "D:\\Projects\\Connecta";
     private static final String CONFIG_FILE_NAME = "config.properties";
 
     private final File configFile;
     private final Properties properties = new Properties();
 
+    private String permanentConnectaID;
     private String localDeviceName;
     private boolean darkMode = true;
     private boolean soundEnabled = true;
@@ -158,11 +161,16 @@ public class ConfigManager {
     }
 
     private ConfigManager() {
-        File dir = new File(System.getProperty("user.home"), CONFIG_DIR_NAME);
-        if (!dir.exists()) {
-            dir.mkdirs();
+        // Priority 1: D:\Projects\Connecta\config.properties
+        File projDir = new File(PROJECT_DIR);
+        if (projDir.exists() && projDir.isDirectory()) {
+            this.configFile = new File(projDir, CONFIG_FILE_NAME);
+        } else {
+            // Fallback: ~/.connecta/config.properties
+            File fallbackDir = new File(System.getProperty("user.home"), ".connecta");
+            if (!fallbackDir.exists()) fallbackDir.mkdirs();
+            this.configFile = new File(fallbackDir, CONFIG_FILE_NAME);
         }
-        this.configFile = new File(dir, CONFIG_FILE_NAME);
 
         // Detect default local device hostname
         try {
@@ -181,6 +189,17 @@ public class ConfigManager {
             } catch (IOException e) {
                 System.err.println("Could not load config file: " + e.getMessage());
             }
+        }
+
+        // PERMANENT CONNECTA ID RESOLUTION:
+        // Immune to Wi-Fi/DHCP network changes. Generated once and persistently stored.
+        String existingId = properties.getProperty("permanentConnectaID");
+        if (existingId != null && !existingId.trim().isEmpty()) {
+            this.permanentConnectaID = existingId.trim().toUpperCase();
+        } else {
+            // Generate clean 8-character uppercase Hex identifier
+            this.permanentConnectaID = UUID.randomUUID().toString().replace("-", "").substring(0, 8).toUpperCase();
+            properties.setProperty("permanentConnectaID", this.permanentConnectaID);
         }
 
         this.localDeviceName = properties.getProperty("localDeviceName", this.localDeviceName);
@@ -211,7 +230,7 @@ public class ConfigManager {
             }
         }
 
-        // Ensure at least one default shared folder exists: ~/ConnectaSync
+        // Ensure default shared folder exists
         if (sharedFolders.isEmpty()) {
             String defaultPath = System.getProperty("user.home") + File.separator + "ConnectaSync";
             File d = new File(defaultPath);
@@ -219,11 +238,13 @@ public class ConfigManager {
                 d.mkdirs();
             }
             sharedFolders.add(new FolderConfig("default", "Default Sync Folder", defaultPath, false));
-            saveConfig();
         }
+
+        saveConfig();
     }
 
     public synchronized void saveConfig() {
+        properties.setProperty("permanentConnectaID", permanentConnectaID != null ? permanentConnectaID : "");
         properties.setProperty("localDeviceName", localDeviceName != null ? localDeviceName : "Connecta-Device");
         properties.setProperty("darkMode", String.valueOf(darkMode));
         properties.setProperty("soundEnabled", String.valueOf(soundEnabled));
@@ -326,6 +347,10 @@ public class ConfigManager {
 
     public List<FolderConfig> getSharedFolders() {
         return Collections.unmodifiableList(new ArrayList<>(sharedFolders));
+    }
+
+    public String getPermanentConnectaID() {
+        return permanentConnectaID;
     }
 
     public String getLocalDeviceName() {
