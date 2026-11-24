@@ -5,7 +5,10 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.InterfaceAddress;
+import java.net.NetworkInterface;
 import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -18,9 +21,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * TCP background reconnection.
  * 
  * Features:
- * 1. Broadcasts Permanent Connecta ID, Device Name, active LAN IP, and TCP listening port.
- * 2. Maintains a concurrent registry of discovered LAN peers.
- * 3. Notifies AppManager when peers appear or change IP addresses.
+ * 1. Broadcasts to both subnet-directed broadcast addresses (e.g., 192.168.1.255) and global 255.255.255.255.
+ * 2. Broadcasts Permanent Connecta ID, Device Name, active LAN IPv4, and TCP listening port.
+ * 3. Maintains a concurrent registry of discovered LAN peers.
+ * 4. Notifies AppManager when peers appear or change IP addresses.
  */
 public class LanDiscoveryDaemon {
 
@@ -94,13 +98,34 @@ public class LanDiscoveryDaemon {
         startBeaconThread();
     }
 
+    private List<InetAddress> getBroadcastAddresses() {
+        List<InetAddress> broadcastList = new ArrayList<>();
+        try {
+            broadcastList.add(InetAddress.getByName("255.255.255.255"));
+        } catch (Exception ignored) {}
+
+        try {
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces != null && interfaces.hasMoreElements()) {
+                NetworkInterface iface = interfaces.nextElement();
+                if (!iface.isUp() || iface.isLoopback()) continue;
+
+                for (InterfaceAddress ifAddr : iface.getInterfaceAddresses()) {
+                    InetAddress broadcast = ifAddr.getBroadcast();
+                    if (broadcast != null && !broadcastList.contains(broadcast)) {
+                        broadcastList.add(broadcast);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return broadcastList;
+    }
+
     private void startBeaconThread() {
         beaconThread = new Thread(() -> {
             try {
                 broadcastSocket = new DatagramSocket();
                 broadcastSocket.setBroadcast(true);
-
-                InetAddress broadcastAddr = InetAddress.getByName("255.255.255.255");
 
                 while (running) {
                     try {
@@ -108,13 +133,18 @@ public class LanDiscoveryDaemon {
                         String message = BEACON_PREFIX + myConnectaID + "|" + myDeviceName + "|" + currentLanIp + "|" + myTcpPort;
                         byte[] buffer = message.getBytes(java.nio.charset.StandardCharsets.UTF_8);
 
-                        DatagramPacket packet = new DatagramPacket(buffer, buffer.length, broadcastAddr, UDP_DISCOVERY_PORT);
-                        broadcastSocket.send(packet);
-                    } catch (IOException ignored) {}
+                        List<InetAddress> targets = getBroadcastAddresses();
+                        for (InetAddress target : targets) {
+                            try {
+                                DatagramPacket packet = new DatagramPacket(buffer, buffer.length, target, UDP_DISCOVERY_PORT);
+                                broadcastSocket.send(packet);
+                            } catch (IOException ignored) {}
+                        }
+                    } catch (Exception ignored) {}
 
-                    // Broadcast beacon every 3.5 seconds
+                    // Broadcast beacon every 3.0 seconds
                     try {
-                        Thread.sleep(3500);
+                        Thread.sleep(3000);
                     } catch (InterruptedException e) {
                         break;
                     }
@@ -162,7 +192,7 @@ public class LanDiscoveryDaemon {
                             if (parts.length >= 4) {
                                 // Payload format: ID | Name | LAN_IP | Port
                                 String declaredIp = parts[2].trim();
-                                if (!declaredIp.isEmpty() && !declaredIp.equals("127.0.0.1") && !declaredIp.contains(":")) {
+                                if (!declaredIp.isEmpty() && !declaredIp.equals("127.0.0.1") && IDResolver.isPrivateLANIPv4(declaredIp)) {
                                     peerIp = declaredIp;
                                 }
                                 try {
@@ -175,8 +205,8 @@ public class LanDiscoveryDaemon {
                                 } catch (Exception ignored) {}
                             }
 
-                            // Ignore loopback beacons from this local instance
-                            if (!peerId.equalsIgnoreCase(myConnectaID)) {
+                            // Verify peer IP is a valid private LAN address and not self-loopback
+                            if (!peerId.equalsIgnoreCase(myConnectaID) && IDResolver.isPrivateLANIPv4(peerIp)) {
                                 DiscoveredPeer discovered = new DiscoveredPeer(peerId, peerName, peerIp, peerPort, System.currentTimeMillis());
                                 discoveredPeers.put(peerId, discovered);
 

@@ -285,25 +285,36 @@ public class ConnectionPanel extends JPanel {
         card.add(Box.createVerticalStrut(20));
 
         // YOUR CONNECTA ID SECTION
-        card.add(sectionLabel("YOUR CONNECTA ID"));
+        card.add(sectionLabel("YOUR CONNECTA ID & LOCAL LAN IP"));
         card.add(Box.createVerticalStrut(7));
 
         RoundedPanel idBox = new RoundedPanel(CARD_BG, 15);
         idBox.setLayout(new BorderLayout(8, 0));
-        idBox.setBorder(new EmptyBorder(12, 14, 12, 10));
-        idBox.setMaximumSize(new Dimension(Integer.MAX_VALUE, 52));
+        idBox.setBorder(new EmptyBorder(10, 14, 10, 10));
+        idBox.setMaximumSize(new Dimension(Integer.MAX_VALUE, 58));
         idBox.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JPanel idInfoPanel = new JPanel(new GridLayout(2, 1, 0, 2));
+        idInfoPanel.setOpaque(false);
 
         myIdLabel = new JLabel(myID);
         myIdLabel.setFont(new Font("Monospaced", Font.BOLD, 15));
         myIdLabel.setForeground(CYAN);
 
-        copyButton = new JButton("COPY");
+        String localIp = IDResolver.getLocalIPv4Address();
+        JLabel myLanIpLabel = new JLabel("Local LAN IP: " + localIp);
+        myLanIpLabel.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        myLanIpLabel.setForeground(MUTED);
+
+        idInfoPanel.add(myIdLabel);
+        idInfoPanel.add(myLanIpLabel);
+
+        copyButton = new JButton("COPY ID");
         styleSecondaryButton(copyButton);
         copyButton.setEnabled(false);
         copyButton.addActionListener(e -> copyMyID());
 
-        idBox.add(myIdLabel, BorderLayout.CENTER);
+        idBox.add(idInfoPanel, BorderLayout.CENTER);
         idBox.add(copyButton, BorderLayout.EAST);
 
         card.add(idBox);

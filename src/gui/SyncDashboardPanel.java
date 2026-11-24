@@ -70,6 +70,7 @@ public class SyncDashboardPanel extends JPanel {
     private JLabel filesReceivedLabel;
     private JLabel totalTransfersLabel;
     private JLabel identificationLabel;
+    private JLabel localIpLabel;
 
     // Folder & Remote Device Container Panels
     private JPanel foldersContainerPanel;
@@ -564,8 +565,12 @@ public class SyncDashboardPanel extends JPanel {
         top.add(version, BorderLayout.EAST);
 
         // Telemetry Grid
-        JPanel grid = new JPanel(new GridLayout(5, 2, 8, 4));
+        JPanel grid = new JPanel(new GridLayout(6, 2, 8, 4));
         grid.setOpaque(false);
+
+        grid.add(telemetryLabel("Local LAN IPv4"));
+        localIpLabel = telemetryValue(network.IDResolver.getLocalIPv4Address() + ":" + AppManager.getInstance().getListeningPort(), GREEN);
+        grid.add(localIpLabel);
 
         grid.add(telemetryLabel("Download Rate"));
         downloadRateLabel = telemetryValue("0 B/s", CYAN);
@@ -931,6 +936,9 @@ public class SyncDashboardPanel extends JPanel {
         }
         if (identificationLabel != null) {
             identificationLabel.setText(AppManager.getInstance().getMyConnectaID());
+        }
+        if (localIpLabel != null) {
+            localIpLabel.setText(network.IDResolver.getLocalIPv4Address() + ":" + AppManager.getInstance().getListeningPort());
         }
     }
 

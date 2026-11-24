@@ -20,8 +20,10 @@ import java.util.List;
  *    and immune to Wi-Fi/DHCP IP switches).
  * 2. Physical LAN IPv4 Resolution: Specifically audits all network interfaces and eliminates
  *    virtual adapters (WSL, VMware, VirtualBox, Hyper-V, vEthernet, Docker, ZeroTier, Tailscale)
- *    to reliably resolve the active physical Wi-Fi or Ethernet LAN IPv4 address.
- * 3. Legacy Hex Mapping: Resolves legacy 8-character hex-encoded IPv4 addresses for backwards compatibility.
+ *    to reliably resolve the active physical Wi-Fi or Ethernet LAN IPv4 address (preferring 192.168.x.x,
+ *    10.x.x.x, or 172.16-31.x.x).
+ * 3. Safe Hex Mapping: Only decodes 8-character hex strings if they resolve to a valid private LAN IPv4 address,
+ *    preventing random Connecta UUIDs from mistakenly decoding into public internet addresses.
  */
 public class IDResolver {
 
@@ -48,7 +50,7 @@ public class IDResolver {
     public static String generateIDFromIP() {
         try {
             String ip = getLocalIPv4Address();
-            if (ip == null || ip.isEmpty() || ip.equals("127.0.0.1")) {
+            if (ip == null || ip.isEmpty() || ip.equals("127.0.0.1") || !isPrivateLANIPv4(ip)) {
                 return getPermanentConnectaID();
             }
 
@@ -72,8 +74,12 @@ public class IDResolver {
      * Converts an 8-character Hexadecimal Connecta ID back into a standard
      * dotted-quad IPv4 address (e.g., "C0A80105" -> "192.168.1.5").
      * 
+     * CRITICAL SAFETY: Only returns the IP if it falls strictly within a private
+     * LAN subnet (192.168.x.x, 10.x.x.x, 172.16-31.x.x). Random Connecta IDs
+     * (e.g. "7940F566") will return null to prevent timeout connections to public IPs.
+     * 
      * @param id The 8-character Hex ID.
-     * @return Decoded IPv4 string, or null if ID format is invalid.
+     * @return Decoded private IPv4 string, or null if ID format is invalid or not a LAN IP.
      */
     public static String resolveIPFromID(String id) {
         if (id == null) return null;
@@ -95,7 +101,12 @@ public class IDResolver {
                     ip.append(".");
                 }
             }
-            return ip.toString();
+            String resolved = ip.toString();
+            // Reject any IP that is NOT a private local LAN IP
+            if (!isPrivateLANIPv4(resolved)) {
+                return null;
+            }
+            return resolved;
         } catch (NumberFormatException e) {
             return null; // Non-hexadecimal characters encountered
         }
@@ -120,8 +131,23 @@ public class IDResolver {
     }
 
     /**
+     * Checks if a given IPv4 address belongs to standard private local LAN subnets:
+     * - 192.168.0.0/16
+     * - 10.0.0.0/8
+     * - 172.16.0.0/12
+     */
+    public static boolean isPrivateLANIPv4(String ip) {
+        if (ip == null || !isIPv4Address(ip)) return false;
+        if (ip.startsWith("192.168.")) return true;
+        if (ip.startsWith("10.")) return true;
+        if (isPrivate172(ip)) return true;
+        return false;
+    }
+
+    /**
      * Resolves the primary active physical LAN IPv4 address (Wi-Fi or Ethernet).
-     * Strictly filters out loopback, inactive, and virtual adapters.
+     * Strictly filters out loopback, inactive, and virtual adapters, prioritizing
+     * private subnets (192.168.x.x, 10.x.x.x, 172.16-31.x.x).
      * 
      * @return Dotted-decimal IPv4 address string (e.g. "192.168.1.5"), or "127.0.0.1" fallback.
      */
@@ -160,7 +186,9 @@ public class IDResolver {
                     if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
                         String host = addr.getHostAddress();
                         int score = calculateInterfaceScore(combinedName, addr, host);
-                        candidates.add(new InterfaceCandidate(host, score));
+                        if (score > 0) {
+                            candidates.add(new InterfaceCandidate(host, score));
+                        }
                     }
                 }
             }
@@ -170,10 +198,13 @@ public class IDResolver {
                 return candidates.get(0).ip;
             }
 
-            // Fallback if no prioritized candidates found
+            // Fallback: check local host address if private
             InetAddress localHost = InetAddress.getLocalHost();
             if (localHost instanceof Inet4Address && !localHost.isLoopbackAddress()) {
-                return localHost.getHostAddress();
+                String host = localHost.getHostAddress();
+                if (isPrivateLANIPv4(host)) {
+                    return host;
+                }
             }
             return "127.0.0.1";
         } catch (Exception e) {
@@ -185,26 +216,31 @@ public class IDResolver {
      * Evaluates and scores an interface to select the most reliable physical LAN adapter.
      */
     private static int calculateInterfaceScore(String combinedName, InetAddress addr, String host) {
-        int score = 0;
-
-        // Prefer physical Wi-Fi and Ethernet adapters
-        if (combinedName.contains("wi-fi") || combinedName.contains("wifi") || combinedName.contains("wlan") || combinedName.contains("wireless")) {
-            score += 100;
-        } else if (combinedName.contains("ethernet") || combinedName.contains("eth") || combinedName.contains("en0") || combinedName.contains("en1")) {
-            score += 90;
+        // Enforce private LAN IPv4 requirement
+        if (!isPrivateLANIPv4(host)) {
+            return -1000;
         }
 
-        // Prefer standard private LAN subnets
+        int score = 100;
+
+        // Prefer physical Wi-Fi and Ethernet adapters
+        if (combinedName.contains("wi-fi") || combinedName.contains("wifi") || combinedName.contains("wlan") || combinedName.contains("wireless") || combinedName.contains("802.11")) {
+            score += 200;
+        } else if (combinedName.contains("ethernet") || combinedName.contains("eth") || combinedName.contains("en0") || combinedName.contains("en1") || combinedName.contains("gigabit") || combinedName.contains("lan")) {
+            score += 180;
+        }
+
+        // Subnet prioritization
         if (host.startsWith("192.168.")) {
-            score += 50;
+            score += 80;
         } else if (host.startsWith("10.")) {
-            score += 40;
+            score += 60;
         } else if (isPrivate172(host)) {
-            score += 30;
+            score += 50;
         }
 
         if (addr.isSiteLocalAddress()) {
-            score += 20;
+            score += 30;
         }
 
         return score;

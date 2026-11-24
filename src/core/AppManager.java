@@ -956,8 +956,8 @@ public class AppManager {
             String ipToConnect = null;
             int portToConnect = NetworkManager.DEFAULT_PORT;
 
-            // 1. Direct IP format (e.g. "192.168.1.5" or "192.168.1.5:8080")
-            if (target.contains(".")) {
+            // 1. Direct LAN IP entry (e.g. "192.168.1.5" or "192.168.1.5:8080" or "10.0.0.5")
+            if (IDResolver.isIPv4Address(target) || (target.contains(":") && IDResolver.isIPv4Address(target.split(":")[0]))) {
                 if (target.contains(":")) {
                     String[] parts = target.split(":");
                     ipToConnect = parts[0].trim();
@@ -972,25 +972,25 @@ public class AppManager {
             // 2. Saved Paired Device in ConfigManager
             if (ipToConnect == null) {
                 ConfigManager.PairedDevice paired = configManager.getPairedDevice(target);
-                if (paired != null && !paired.getLastKnownIp().isEmpty()) {
+                if (paired != null && !paired.getLastKnownIp().isEmpty() && IDResolver.isPrivateLANIPv4(paired.getLastKnownIp())) {
                     ipToConnect = paired.getLastKnownIp();
                     portToConnect = paired.getPort();
                 }
             }
 
-            // 3. Actively Discovered Peer on LAN (UDP Beacon)
+            // 3. Actively Discovered Peer on LAN (UDP Broadcast Beacon)
             if (ipToConnect == null && discoveryDaemon != null) {
                 LanDiscoveryDaemon.DiscoveredPeer peer = discoveryDaemon.getDiscoveredPeer(target);
-                if (peer != null && !peer.ip.isEmpty()) {
+                if (peer != null && !peer.ip.isEmpty() && IDResolver.isPrivateLANIPv4(peer.ip)) {
                     ipToConnect = peer.ip;
                     portToConnect = peer.port;
                 }
             }
 
-            // 4. Legacy Hex-encoded IPv4 fallback
+            // 4. Legacy Hex-encoded IPv4 fallback (strictly validated for private LAN subnets)
             if (ipToConnect == null) {
                 String decoded = IDResolver.resolveIPFromID(target);
-                if (decoded != null) {
+                if (decoded != null && IDResolver.isPrivateLANIPv4(decoded)) {
                     ipToConnect = decoded;
                 }
             }
@@ -1000,14 +1000,16 @@ public class AppManager {
                 final int finalPort = portToConnect;
                 dispatch(() -> {
                     for (AppEventListener l : listeners) {
-                        l.onLog("Connection", "Connecting to " + target + " (" + finalIp + ":" + finalPort + ")...");
+                        l.onLog("Connection", "Connecting to " + target + " at LAN address " + finalIp + ":" + finalPort + "...");
                     }
                 });
                 networkManager.connectToAddress(finalIp, finalPort);
             } else {
+                String myLanIp = IDResolver.getLocalIPv4Address();
                 dispatch(() -> {
                     for (AppEventListener l : listeners) {
-                        l.onConnectionError("Peer '" + target + "' not discovered on LAN. Check Wi-Fi or enter LAN IP directly.");
+                        l.onConnectionError("Connecta ID '" + target + "' not discovered on LAN yet. Enter partner's LAN IP directly (e.g. 192.168.x.x) or verify Wi-Fi.");
+                        l.onLog("Connection", "ID '" + target + "' not found on LAN broadcast. Your LAN IP is " + myLanIp + ". If partner laptop is online, enter partner's direct LAN IP.");
                     }
                 });
             }
@@ -1069,6 +1071,8 @@ public class AppManager {
     public FolderWatcherDaemon.FolderStats getCurrentFolderStats() { return currentFolderStats; }
     public ConfigManager getConfigManager() { return configManager; }
     public LanDiscoveryDaemon getDiscoveryDaemon() { return discoveryDaemon; }
+    public int getListeningPort() { return networkManager.getListeningPort(); }
+    public String getLocalLANIP() { return IDResolver.getLocalIPv4Address(); }
 
     public String getFormattedUptime() {
         long uptimeSec = (System.currentTimeMillis() - appStartTime) / 1000;

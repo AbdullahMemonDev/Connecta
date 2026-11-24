@@ -112,13 +112,13 @@ public class NetworkManager {
     }
 
     /**
-     * Connects to a remote peer using their 8-character Connecta Hex ID.
+     * Connects to a remote peer using their 8-character Connecta Hex ID or LAN IP.
      */
     public void connectToPeer(String partnerID) {
         String ip = IDResolver.resolveIPFromID(partnerID);
-        if (ip == null) {
+        if (ip == null || !IDResolver.isPrivateLANIPv4(ip)) {
             if (listener != null) {
-                listener.onConnectionFailed("Invalid Connecta ID format. Must be an 8-character Hex code.");
+                listener.onConnectionFailed("Connecta ID '" + partnerID + "' not yet discovered on LAN. Enter partner's LAN IP directly (e.g. 192.168.x.x).");
             }
             return;
         }
