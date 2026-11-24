@@ -174,9 +174,8 @@ public class FilePacket {
             throw new IOException("Malformed packet frame: invalid dataLength " + dataLength);
         }
 
-        byte[] chunkData = null;
+        byte[] chunkData = new byte[dataLength];
         if (dataLength > 0) {
-            chunkData = new byte[dataLength];
             in.readFully(chunkData, 0, dataLength);
         }
 

@@ -111,6 +111,90 @@ public class ConnectaVerificationTest {
             failed++;
         }
 
+        // TEST 6: File Chunking & Packet Serialization (0-byte file & text file)
+        try {
+            java.io.File testDir = new java.io.File("bin/test_scratch");
+            testDir.mkdirs();
+            java.io.File zeroByteFile = new java.io.File(testDir, "empty_test.txt");
+            if (zeroByteFile.exists()) zeroByteFile.delete();
+            zeroByteFile.createNewFile();
+
+            filesystem.FileChunkManager chunkMgr = new filesystem.FileChunkManager();
+            java.util.List<byte[]> zeroChunks = new java.util.ArrayList<>();
+            chunkMgr.splitFileIntoChunks(zeroByteFile, (chunk, seq, total, readBytes, size) -> {
+                zeroChunks.add(chunk);
+            });
+
+            if (zeroChunks.size() == 1 && zeroChunks.get(0).length == 0) {
+                System.out.println("✓ PASS: 0-byte file correctly produces 1 chunk with 0 bytes!");
+                passed++;
+            } else {
+                System.err.println("✗ FAIL: 0-byte file chunking produced unexpected chunks: " + zeroChunks.size());
+                failed++;
+            }
+
+            // Test Packet Serialization & Deserialization over stream for 0-byte packet
+            SyncStateManager syncStateMgr = new SyncStateManager();
+            String zeroChecksum = syncStateMgr.calculateChecksum(zeroByteFile);
+            network.FilePacket zeroPacket = network.FilePacket.createChunkPacket("empty_test.txt", 1, 1, zeroChunks.get(0));
+            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+            java.io.DataOutputStream dos = new java.io.DataOutputStream(baos);
+            zeroPacket.writeToStream(dos);
+            dos.flush();
+
+            java.io.ByteArrayInputStream bais = new java.io.ByteArrayInputStream(baos.toByteArray());
+            java.io.DataInputStream dis = new java.io.DataInputStream(bais);
+            network.FilePacket deserializedZero = network.FilePacket.readFromStream(dis);
+
+            if (deserializedZero != null && deserializedZero.getChunkData() != null && deserializedZero.getChunkData().length == 0) {
+                System.out.println("✓ PASS: 0-byte FilePacket deserializes with non-null byte[0] and preserved framing!");
+                passed++;
+            } else {
+                System.err.println("✗ FAIL: Deserialized 0-byte packet has null or invalid data!");
+                failed++;
+            }
+
+            // TEST 7: Text file chunking, temp file staging, and reassembly integrity
+            java.io.File textFile = new java.io.File(testDir, "hello_ahmed.txt");
+            byte[] textBytes = "Hello Ahmed, Lan Sync Test Successful!".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            java.nio.file.Files.write(textFile.toPath(), textBytes);
+            String textChecksum = syncStateMgr.calculateChecksum(textFile);
+
+            java.util.List<byte[]> textChunks = new java.util.ArrayList<>();
+            chunkMgr.splitFileIntoChunks(textFile, (chunk, seq, total, readBytes, size) -> {
+                textChunks.add(chunk);
+            });
+
+            java.io.File destFile = new java.io.File(testDir, "hello_ahmed_received.txt");
+            java.io.File tempFile = new java.io.File(destFile.getAbsolutePath() + filesystem.FileChunkManager.TMP_EXTENSION);
+            if (destFile.exists()) destFile.delete();
+            if (tempFile.exists()) tempFile.delete();
+
+            boolean isFirst = true;
+            for (byte[] chunk : textChunks) {
+                chunkMgr.writeChunkToTempFile(tempFile, chunk, isFirst);
+                isFirst = false;
+            }
+            boolean reassembled = chunkMgr.finalizeReassembly(tempFile, destFile, textChecksum, syncStateMgr, "hello_ahmed.txt");
+            if (reassembled && destFile.exists() && destFile.length() == textBytes.length) {
+                System.out.println("✓ PASS: Text file chunked, staged to temp, and finalized with 100% MD5 integrity (" + textChecksum + ")!");
+                passed++;
+            } else {
+                System.err.println("✗ FAIL: Text file reassembly failed integrity check or size mismatch!");
+                failed++;
+            }
+
+            // Clean up test scratch
+            zeroByteFile.delete();
+            textFile.delete();
+            destFile.delete();
+            testDir.delete();
+        } catch (Exception e) {
+            System.err.println("✗ FAIL: Test 6/7 threw exception: " + e.getMessage());
+            e.printStackTrace();
+            failed++;
+        }
+
         System.out.println("\n========== TEST SUMMARY ==========");
         System.out.println("Passed: " + passed + " / " + (passed + failed));
         if (failed == 0) {

@@ -13,11 +13,15 @@ import javax.swing.SwingUtilities;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.Stack;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -98,6 +102,18 @@ public class AppManager {
     private final AtomicInteger filesSentCount = new AtomicInteger(0);
     private final AtomicInteger filesReceivedCount = new AtomicInteger(0);
     private final AtomicInteger totalTransfersCount = new AtomicInteger(0);
+
+    // Sequential single-worker executor for streaming outgoing files strictly one by one over TCP
+    private final ExecutorService outgoingFileExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "Connecta-OutgoingFileWorker");
+        t.setDaemon(true);
+        return t;
+    });
+
+    // Catch-Up Sync Debounce & Concurrency Guard
+    private final AtomicBoolean isCatchUpSyncRunning = new AtomicBoolean(false);
+    private volatile long lastCatchUpSyncTime = 0;
+    private static final long CATCHUP_DEBOUNCE_MS = 6000; // Minimum 6 seconds between CatchUpSync runs
 
     // Auto-Reconnect Timer
     private Timer autoReconnectTimer;
@@ -408,38 +424,52 @@ public class AppManager {
     public void performCatchUpSync() {
         if (!networkManager.isConnected()) return;
 
+        long now = System.currentTimeMillis();
+        if (now - lastCatchUpSyncTime < CATCHUP_DEBOUNCE_MS) {
+            return; // Debounce rapid consecutive CatchUpSync triggers
+        }
+        if (!isCatchUpSyncRunning.compareAndSet(false, true)) {
+            return; // Already in progress
+        }
+
+        lastCatchUpSyncTime = now;
+
         new Thread(() -> {
-            dispatch(() -> {
-                for (AppEventListener l : listeners) {
-                    l.onSyncStatusChanged("Syncing (Catch-Up)...");
-                    l.onLog("CatchUpSync", "Initiating catch-up directory scan (DFS Traversal)");
+            try {
+                dispatch(() -> {
+                    for (AppEventListener l : listeners) {
+                        l.onSyncStatusChanged("Syncing (Catch-Up)...");
+                        l.onLog("CatchUpSync", "Initiating catch-up directory scan (DFS Traversal)");
+                    }
+                });
+
+                File rootDir = new File(getSharedFolderPath());
+                if (!rootDir.exists()) rootDir.mkdirs();
+
+                // 1. Traverse N-ary Tree via DFS to index current files
+                FolderWatcherDaemon.computeFolderStatsDFS(rootDir);
+
+                // 2. Exchange Manifest Packet with peer
+                String manifest = syncStateManager.buildManifestString();
+                SocketStreamer streamer = networkManager.getStreamer();
+                if (streamer != null && streamer.isRunning()) {
+                    streamer.offerPacket(FilePacket.createManifestPacket(manifest), 1000);
                 }
-            });
 
-            File rootDir = new File(getSharedFolderPath());
-            if (!rootDir.exists()) rootDir.mkdirs();
+                // 3. Scan and sync any local files that differ from recorded history
+                scanAndSyncAllLocalFilesDFS(rootDir, "");
 
-            // 1. Traverse N-ary Tree via DFS to index current files
-            FolderWatcherDaemon.computeFolderStatsDFS(rootDir);
+                rescanLocalFolderStats();
 
-            // 2. Exchange Manifest Packet with peer
-            String manifest = syncStateManager.buildManifestString();
-            SocketStreamer streamer = networkManager.getStreamer();
-            if (streamer != null && streamer.isRunning()) {
-                streamer.offerPacket(FilePacket.createManifestPacket(manifest), 1000);
+                dispatch(() -> {
+                    for (AppEventListener l : listeners) {
+                        l.onSyncStatusChanged("Up to Date");
+                        l.onLog("CatchUpSync", "Catch-up scan completed. Folders synchronized.");
+                    }
+                });
+            } finally {
+                isCatchUpSyncRunning.set(false);
             }
-
-            // 3. Scan and sync any local files that differ from recorded history
-            scanAndSyncAllLocalFilesDFS(rootDir, "");
-
-            rescanLocalFolderStats();
-
-            dispatch(() -> {
-                for (AppEventListener l : listeners) {
-                    l.onSyncStatusChanged("Up to Date");
-                    l.onLog("CatchUpSync", "Catch-up scan completed. Folders synchronized.");
-                }
-            });
         }, "Connecta-CatchUpSyncWorker").start();
     }
 
@@ -473,20 +503,34 @@ public class AppManager {
         new Thread(() -> {
             File rootDir = new File(getSharedFolderPath());
             String[] lines = remoteManifest.split("\n");
+            Map<String, String> remoteMap = new ConcurrentHashMap<>();
             for (String line : lines) {
                 int idx = line.indexOf('=');
                 if (idx > 0) {
                     String relPath = SyncStateManager.normalizePath(line.substring(0, idx).trim());
                     String remoteHash = line.substring(idx + 1).trim();
+                    remoteMap.put(relPath, remoteHash);
+                }
+            }
 
-                    File localFile = new File(rootDir, relPath);
-                    if (localFile.exists()) {
-                        String localHash = syncStateManager.calculateChecksum(localFile);
-                        if (localHash != null && !localHash.equalsIgnoreCase(remoteHash)) {
-                            if (localFile.lastModified() > 0) {
-                                syncFileToPeer(localFile, relPath);
-                            }
-                        }
+            // 1. Compare local files against remote manifest:
+            // If remote peer is missing a local file or has an outdated checksum, queue it to peer
+            for (Map.Entry<String, String> entry : syncStateManager.getAllTrackedFiles().entrySet()) {
+                String localRel = entry.getKey();
+                String localHash = entry.getValue();
+                String remoteHash = remoteMap.get(localRel);
+
+                if (remoteHash == null) {
+                    // Remote peer does not have this file at all; send it
+                    File localFile = new File(rootDir, localRel);
+                    if (localFile.exists() && localFile.isFile()) {
+                        syncFileToPeer(localFile, localRel);
+                    }
+                } else if (!localHash.equalsIgnoreCase(remoteHash)) {
+                    // Hashes differ: check if local was modified more recently
+                    File localFile = new File(rootDir, localRel);
+                    if (localFile.exists() && localFile.isFile()) {
+                        syncFileToPeer(localFile, localRel);
                     }
                 }
             }
@@ -590,8 +634,9 @@ public class AppManager {
                     l.onTransferProgress(normPath, 100, "Received & Verified", false);
                     l.onTransferComplete(normPath, false);
                     l.onSyncStatusChanged("Up to Date");
-                    l.onLog(normPath, "MD5 verified. Committed atomically to shared folder.");
+                    l.onLog(normPath, "MD5 verified. Saved to shared folder (" + finalDestFile.length() + " bytes)");
                     l.onStatsUpdated(filesSentCount.get(), rec, total);
+                    l.onSharedFolderChanged(getSharedFolderPath());
                 }
             });
         } else {
@@ -651,11 +696,6 @@ public class AppManager {
             return;
         }
 
-        SocketStreamer streamer = networkManager.getStreamer();
-        if (streamer == null || !streamer.isRunning()) {
-            return;
-        }
-
         final String normPath = SyncStateManager.normalizePath(relativePath);
 
         // Anti-Loop Guard: Suppress self-triggered events for files recently written by peer
@@ -667,13 +707,20 @@ public class AppManager {
             }
         }
 
-        new Thread(() -> {
+        // Sequential FIFO submission: streams files strictly one at a time over TCP without packet interleaving
+        outgoingFileExecutor.submit(() -> {
             try {
+                if (!networkManager.isConnected()) return;
+
+                SocketStreamer streamer = networkManager.getStreamer();
+                if (streamer == null || !streamer.isRunning()) return;
+
                 // PARTIAL-READ RACE CONDITION FIX: Wait until file writing completes and file is readable
-                if (!FolderWatcherDaemon.waitForFileStability(file, 10000)) {
+                if (!FolderWatcherDaemon.waitForFileStability(file, 8000)) {
                     return;
                 }
 
+                long fileSize = file.length();
                 String checksum = syncStateManager.calculateChecksum(file);
                 if (checksum == null) return;
 
@@ -684,7 +731,6 @@ public class AppManager {
 
                 syncStateManager.recordSyncedState(normPath, checksum);
 
-                long fileSize = file.length();
                 int totalChunks = FileChunkManager.calculateTotalChunks(fileSize);
 
                 dispatch(() -> {
@@ -732,7 +778,7 @@ public class AppManager {
                         l.onTransferProgress(file.getName(), 100, "Sent successfully", true);
                         l.onTransferComplete(file.getName(), true);
                         l.onSyncStatusChanged("Up to Date");
-                        l.onLog(file.getName(), "Transferred successfully");
+                        l.onLog(file.getName(), "Transferred successfully (" + fileSize + " bytes)");
                         l.onStatsUpdated(sent, filesReceivedCount.get(), total);
                     }
                 });
@@ -744,7 +790,7 @@ public class AppManager {
                     }
                 });
             }
-        }, "Connecta-FileSender-" + file.getName()).start();
+        });
     }
 
     public void syncFileDeletion(String relativePath) {
@@ -1043,6 +1089,9 @@ public class AppManager {
     }
 
     public void shutdown() {
+        if (outgoingFileExecutor != null) {
+            outgoingFileExecutor.shutdownNow();
+        }
         if (autoReconnectTimer != null) {
             autoReconnectTimer.cancel();
             autoReconnectTimer = null;

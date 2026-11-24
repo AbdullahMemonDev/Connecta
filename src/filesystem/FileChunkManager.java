@@ -96,7 +96,7 @@ public class FileChunkManager {
      * @throws IOException If disk write fails.
      */
     public void writeChunkToTempFile(File tempFile, byte[] chunkData, boolean isFirstChunk) throws IOException {
-        if (tempFile == null || chunkData == null) {
+        if (tempFile == null) {
             return;
         }
 
@@ -107,10 +107,10 @@ public class FileChunkManager {
 
         // Open in overwrite mode for chunk 0, append mode for subsequent chunks
         try (FileOutputStream fos = new FileOutputStream(tempFile, !isFirstChunk)) {
-            if (chunkData.length > 0) {
+            if (chunkData != null && chunkData.length > 0) {
                 fos.write(chunkData);
-                fos.flush();
             }
+            fos.flush();
         }
     }
 
@@ -136,7 +136,7 @@ public class FileChunkManager {
         try {
             // 1. Calculate MD5 checksum of assembled temporary staging file
             String actualMD5 = syncManager.calculateChecksum(tempFile);
-            if (actualMD5 == null || !actualMD5.equalsIgnoreCase(expectedMD5)) {
+            if (actualMD5 == null || (expectedMD5 != null && !expectedMD5.isEmpty() && !actualMD5.equalsIgnoreCase(expectedMD5))) {
                 System.err.println("Integrity Check Failed for: " + relativePath + " (Expected: " + expectedMD5 + ", Got: " + actualMD5 + ")");
                 tempFile.delete(); // Purge corrupted temporary file
                 return false;

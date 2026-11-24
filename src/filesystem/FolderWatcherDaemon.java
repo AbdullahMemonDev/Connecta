@@ -329,24 +329,31 @@ public class FolderWatcherDaemon implements Runnable {
         if (file == null || !file.exists()) return false;
         long startTime = System.currentTimeMillis();
         long lastSize = -1;
+        int stableCount = 0;
 
         while (System.currentTimeMillis() - startTime < maxWaitMs) {
             if (!file.exists()) return false;
             long currentSize = file.length();
 
-            // Check if file size is stable across consecutive checks
-            if (currentSize == lastSize && currentSize >= 0) {
-                // Try opening a stream to ensure OS write lock (e.g., Windows copy) is released
-                try (FileInputStream fis = new FileInputStream(file)) {
-                    return true; // File is stable and readable
-                } catch (IOException locked) {
-                    // File is still being actively written / locked
+            if (currentSize == lastSize) {
+                stableCount++;
+                // If file is 0 bytes, wait at least 3 consecutive stable checks (1.5s) to allow
+                // editors like Notepad to write content. If non-empty, 2 checks (1.0s) is sufficient.
+                int requiredChecks = (currentSize == 0) ? 3 : 2;
+                if (stableCount >= requiredChecks) {
+                    try (FileInputStream fis = new FileInputStream(file)) {
+                        return true; // File is stable and fully readable
+                    } catch (IOException locked) {
+                        stableCount = 0; // File is still being actively written / locked
+                    }
                 }
+            } else {
+                stableCount = 0; // Size changed, still being modified
             }
 
             lastSize = currentSize;
             try {
-                Thread.sleep(400);
+                Thread.sleep(500);
             } catch (InterruptedException e) {
                 return false;
             }
